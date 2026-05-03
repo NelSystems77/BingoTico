@@ -352,7 +352,7 @@ const variacionesCantado: { [key: number]: string[] } = {
     "El cincuenta y uno",
   ],
   52: [
-    "Mándese un rezo, el cincuenta y dos",
+    "Sin codos, el cincuenta y dos",
     "A rezar se ha dicho, el cincuenta y dos",
     "Un rezito no hace daño, el cincuenta y dos",
     "El cincuenta y dos",

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useGameStore } from '../stores/gameStore';
 import { useConfigStore } from '../stores/configStore';
 import { SorteoEngine } from '../core/game-engine/core/sorteo.engine';
-import { obtenerLlamadaBola, hablarNumero } from '../utils/bingo';
+import { obtenerLlamadaBola, hablarNumero, desbloquearSpeechSynthesis, detenerKeepAliveIOS } from '../utils/bingo';
 import { firebaseService } from '../services/firebase';
 import type { Partida } from '../types';
 
@@ -18,19 +18,15 @@ export default function Juego() {
   const [jugando, setJugando] = useState(false);
   const [pausado, setPausado] = useState(false);
   const [partida, setPartida] = useState<Partida | null>(null);
-  const [audioDesbloqueado, setAudioDesbloqueado] = useState(false);
-  
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const audioDesbloqueadoRef = useRef(false);
 
-  // ── iOS/Android: desbloquear speechSynthesis con el primer gesto ──
-  // iOS Safari bloquea la síntesis de voz hasta que el usuario interactúa.
-  // Disparamos un utterance silencioso en el primer tap para "desbloquear".
+  // ── iOS Safari: desbloquear speechSynthesis con el primer gesto ──
+  // Usa la función robusta de bingo.ts que incluye keep-alive para iOS.
   const desbloquearAudio = () => {
-    if (audioDesbloqueado || !('speechSynthesis' in window)) return;
-    const u = new SpeechSynthesisUtterance('');
-    u.volume = 0;
-    speechSynthesis.speak(u);
-    setAudioDesbloqueado(true);
+    if (audioDesbloqueadoRef.current) return;
+    audioDesbloqueadoRef.current = true;
+    desbloquearSpeechSynthesis();
   };
 
   // Inicializar sorteo
@@ -60,6 +56,8 @@ export default function Juego() {
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
       }
+      // Detener keep-alive de iOS al salir de la pantalla
+      detenerKeepAliveIOS();
     };
   }, []);
 

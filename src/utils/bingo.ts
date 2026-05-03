@@ -714,99 +714,123 @@ export function verificarBingo(numeros: number[][], numerosExtraidos: number[]):
 }
 
 // ============================================================
-// SINTETIZAR VOZ — Compatible con iOS, Android y Desktop
-// Usa variación aleatoria del cantado para cada número
+// SINTETIZAR VOZ — Compatible con iOS Safari, Android y Desktop
 // ============================================================
 
 /**
  * Selecciona la mejor voz en español disponible en el dispositivo.
- * Prioridad: es-CR > es-MX > es-ES > cualquier es-* > default
+ * Prioridad: es-CR > es-MX > es-US > es-ES > cualquier es-*
  */
-function seleccionarVoz(esFemenina: boolean): SpeechSynthesisVoice | null {
+function seleccionarVoz(): SpeechSynthesisVoice | null {
   const voices = speechSynthesis.getVoices();
   if (voices.length === 0) return null;
 
   const esVoices = voices.filter(v => v.lang.startsWith('es'));
-  if (esVoices.length === 0) return null;
+  if (esVoices.length === 0) return voices[0] ?? null;
 
-  // Preferencias de locale por orden
   const localePrefs = ['es-CR', 'es-MX', 'es-US', 'es-ES', 'es-419'];
-
   for (const locale of localePrefs) {
     const match = esVoices.find(v => v.lang === locale);
     if (match) return match;
   }
 
-  // Fallback: preferir voz local sobre remota
-  const local = esVoices.find(v => v.localService);
-  return local ?? esVoices[0];
+  // Preferir voz local (más natural y no requiere red)
+  return esVoices.find(v => v.localService) ?? esVoices[0];
+}
+
+/**
+ * Construye y dispara un SpeechSynthesisUtterance.
+ * DEBE llamarse sin setTimeout para que iOS Safari lo acepte.
+ */
+function dispararUtterance(texto: string, voz: 'masculina' | 'femenina'): void {
+  const esFemenina = voz === 'femenina';
+  const utterance = new SpeechSynthesisUtterance(texto);
+
+  utterance.lang   = 'es-US';
+  utterance.rate   = 0.82 + Math.random() * 0.13;
+  utterance.pitch  = esFemenina
+    ? 1.15 + Math.random() * 0.15
+    : 0.80 + Math.random() * 0.15;
+  utterance.volume = 1;
+
+  const selectedVoice = seleccionarVoz();
+  if (selectedVoice) {
+    utterance.voice = selectedVoice;
+    utterance.lang  = selectedVoice.lang;
+  }
+
+  speechSynthesis.speak(utterance);
+}
+
+/**
+ * iOS Safari fix: el motor de síntesis se "congela" silenciosamente
+ * después de ~15 s de inactividad. Este intervalo lo mantiene activo.
+ */
+let iosKeepAliveInterval: ReturnType<typeof setInterval> | null = null;
+
+export function iniciarKeepAliveIOS(): void {
+  if (iosKeepAliveInterval) return;
+  iosKeepAliveInterval = setInterval(() => {
+    if (!('speechSynthesis' in window)) return;
+    if (speechSynthesis.speaking) return;   // ya está hablando, no tocar
+    speechSynthesis.resume();               // descongelar si estaba pausado
+  }, 10_000); // cada 10 segundos
+}
+
+export function detenerKeepAliveIOS(): void {
+  if (iosKeepAliveInterval) {
+    clearInterval(iosKeepAliveInterval);
+    iosKeepAliveInterval = null;
+  }
+}
+
+/**
+ * Desbloquea speechSynthesis en iOS Safari.
+ * DEBE llamarse directamente desde un handler de evento de usuario (tap/click).
+ * Usa texto real (no vacío) porque iOS ignora utterances vacíos.
+ */
+export function desbloquearSpeechSynthesis(): void {
+  if (!('speechSynthesis' in window)) return;
+
+  // Utterance silencioso con texto real pero volumen 0
+  const u = new SpeechSynthesisUtterance('.');
+  u.volume = 0;
+  u.rate   = 2;   // lo más rápido posible para que no se note
+
+  const voice = seleccionarVoz();
+  if (voice) {
+    u.voice = voice;
+    u.lang  = voice.lang;
+  } else {
+    u.lang = 'es-US';
+  }
+
+  speechSynthesis.cancel();
+  speechSynthesis.speak(u);
+
+  // Iniciar keep-alive para iOS
+  iniciarKeepAliveIOS();
 }
 
 /**
  * Habla un número con el cantado costarricense.
  * Compatible con iOS Safari, Android Chrome y navegadores de escritorio.
  *
- * NOTAS DE COMPATIBILIDAD MÓVIL:
- * - iOS Safari: speechSynthesis se "congela" si lleva mucho tiempo activo.
- *   Se resuelve con un resume() antes de hablar.
- * - iOS/Android: getVoices() puede devolver [] en la primera llamada.
- *   Se resuelve esperando el evento voiceschanged o con un pequeño delay.
- * - iOS: el lang 'es-CR' no existe; se usa fallback a es-ES/es-MX.
+ * IMPORTANTE: para iOS Safari, desbloquearSpeechSynthesis() debe haberse
+ * llamado previamente desde un evento de usuario (tap/click).
  */
 export function hablarNumero(numero: number, voz: 'masculina' | 'femenina'): void {
   if (!('speechSynthesis' in window)) return;
 
   const texto = obtenerVariacionAleatoria(numero);
-  const esFemenina = voz === 'femenina';
 
-  const speak = () => {
-    // iOS Safari fix: si está pausado/congelado, hacer resume primero
-    if (speechSynthesis.paused) {
-      speechSynthesis.resume();
-    }
-
-    // Cancelar locución anterior
-    speechSynthesis.cancel();
-
-    const utterance = new SpeechSynthesisUtterance(texto);
-
-    // Idioma: usar es-US como fallback más compatible en móviles
-    utterance.lang = 'es-US';
-    utterance.rate = 0.82 + Math.random() * 0.13;   // 0.82 – 0.95
-    utterance.pitch = esFemenina
-      ? 1.15 + Math.random() * 0.15   // 1.15 – 1.30
-      : 0.80 + Math.random() * 0.15;  // 0.80 – 0.95
-    utterance.volume = 1;
-
-    // Asignar voz si hay disponibles
-    const selectedVoice = seleccionarVoz(esFemenina);
-    if (selectedVoice) {
-      utterance.voice = selectedVoice;
-      utterance.lang = selectedVoice.lang;
-    }
-
-    // iOS Safari fix: pequeño timeout para que cancel() surta efecto
-    setTimeout(() => {
-      speechSynthesis.speak(utterance);
-    }, 50);
-  };
-
-  // Si las voces ya están cargadas, hablar de inmediato
-  const voices = speechSynthesis.getVoices();
-  if (voices.length > 0) {
-    speak();
-  } else {
-    // Android/iOS: voces aún no cargadas, esperar el evento
-    const onVoicesChanged = () => {
-      speechSynthesis.removeEventListener('voiceschanged', onVoicesChanged);
-      speak();
-    };
-    speechSynthesis.addEventListener('voiceschanged', onVoicesChanged);
-
-    // Fallback: si voiceschanged no dispara en 500ms, hablar igual
-    setTimeout(() => {
-      speechSynthesis.removeEventListener('voiceschanged', onVoicesChanged);
-      speak();
-    }, 500);
+  // iOS Safari fix: resume() por si se congeló
+  if (speechSynthesis.paused) {
+    speechSynthesis.resume();
   }
+
+  // Cancelar locución anterior y hablar SIN setTimeout
+  // (iOS Safari rechaza speak() dentro de setTimeout si no hay gesto activo)
+  speechSynthesis.cancel();
+  dispararUtterance(texto, voz);
 }

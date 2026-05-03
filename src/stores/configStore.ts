@@ -13,7 +13,7 @@ const DEFAULT_CONFIG: Configuracion = {
   voz: 'masculina',
   extraccion: 'automatica',
   tiempoExtraccion: 5,
-  repetirBola: true,
+  repetirBola: false,
   puntos: {
     activado: false,
     linea: 50,

@@ -18,8 +18,20 @@ export default function Juego() {
   const [jugando, setJugando] = useState(false);
   const [pausado, setPausado] = useState(false);
   const [partida, setPartida] = useState<Partida | null>(null);
+  const [audioDesbloqueado, setAudioDesbloqueado] = useState(false);
   
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // ── iOS/Android: desbloquear speechSynthesis con el primer gesto ──
+  // iOS Safari bloquea la síntesis de voz hasta que el usuario interactúa.
+  // Disparamos un utterance silencioso en el primer tap para "desbloquear".
+  const desbloquearAudio = () => {
+    if (audioDesbloqueado || !('speechSynthesis' in window)) return;
+    const u = new SpeechSynthesisUtterance('');
+    u.volume = 0;
+    speechSynthesis.speak(u);
+    setAudioDesbloqueado(true);
+  };
 
   // Inicializar sorteo
   useEffect(() => {
@@ -97,6 +109,8 @@ export default function Juego() {
   };
 
   const handleIniciar = () => {
+    // Desbloquear audio en iOS/Android con este gesto del usuario
+    desbloquearAudio();
     setJugando(true);
     setPausado(false);
     
@@ -107,14 +121,17 @@ export default function Juego() {
   };
 
   const handlePausar = () => {
+    desbloquearAudio();
     setPausado(!pausado);
   };
 
   const handleExtraerManual = () => {
+    desbloquearAudio();
     extraerBola();
   };
 
   const handleRepetirBola = () => {
+    desbloquearAudio();
     if (bolaActual && config.sonido) {
       hablarNumero(bolaActual, config.voz);
     }

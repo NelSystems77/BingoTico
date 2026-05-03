@@ -448,9 +448,9 @@ const variacionesCantado: { [key: number]: string[] } = {
     "El sesenta y siete",
   ],
   68: [
-    "Sabroso el tamal, el sesenta y ocho",
-    "Qué rico ese tamal, el sesenta y ocho",
-    "Tamalito sabroso, el sesenta y ocho",
+    "LLega en vocho, el sesenta y ocho",
+    "Que sirvan el bizcocho, el sesenta y ocho",
+    "Pero que hermoso, el sesenta y ocho",
     "El sesenta y ocho",
   ],
   69: [
@@ -468,7 +468,7 @@ const variacionesCantado: { [key: number]: string[] } = {
   71: [
     "La bruja, el setenta y uno",
     "Seguimos uno a uno, el setenta y uno",
-    "Uno por uno, el setenta y uno",
+    "Hacha y palo, el setenta y uno",
     "El setenta y uno",
   ],
   72: [

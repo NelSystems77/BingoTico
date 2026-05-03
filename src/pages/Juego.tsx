@@ -39,7 +39,7 @@ export default function Juego() {
     const engine = new SorteoEngine(evento.numBolas);
     setSorteo(engine);
 
-    // Crear partida en Firebase
+    // Crear partida — solo en Firebase si el evento NO es local
     const nuevaPartida: Omit<Partida, 'id'> = {
       eventoId: evento.id,
       bolasExtraidas: [],
@@ -48,9 +48,14 @@ export default function Juego() {
       estado: 'activa',
     };
 
-    firebaseService.createPartida(nuevaPartida).then(id => {
-      setPartida({ ...nuevaPartida, id });
-    });
+    if (!evento.id.startsWith('local-')) {
+      firebaseService.createPartida(nuevaPartida).then(id => {
+        setPartida({ ...nuevaPartida, id });
+      });
+    } else {
+      // Partida local: ID generado sin Firebase
+      setPartida({ ...nuevaPartida, id: `local-partida-${Date.now()}` });
+    }
 
     return () => {
       if (intervalRef.current) {
@@ -98,8 +103,8 @@ export default function Juego() {
       hablarNumero(nuevaBola, config.voz);
     }
 
-    // Actualizar partida en Firebase
-    if (partida) {
+    // Actualizar partida en Firebase (solo si no es local)
+    if (partida && !partida.id.startsWith('local-')) {
       firebaseService.updatePartida(partida.id, {
         bolasExtraidas: [...sorteo.getBolasSorteadas()],
       });
@@ -138,8 +143,9 @@ export default function Juego() {
   const handleFinalizar = async () => {
     setJugando(false);
     setPausado(false);
-    
-    if (partida) {
+
+    // Solo actualizar Firebase si la partida no es local
+    if (partida && !partida.id.startsWith('local-')) {
       await firebaseService.updatePartida(partida.id, {
         estado: 'finalizada',
       });

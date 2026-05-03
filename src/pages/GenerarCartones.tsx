@@ -69,12 +69,15 @@ export default function GenerarCartones() {
     const eventoId = searchParams.get('evento');
 
     if (eventoId && !evento) {
-      firebaseService.getEvento(eventoId).then((e) => {
-        if (e) {
-          setEventoLocal(e);
-          setEvento(e);
-        }
-      });
+      // Solo buscar en Firebase si NO es un ID local
+      if (!eventoId.startsWith('local-')) {
+        firebaseService.getEvento(eventoId).then((e) => {
+          if (e) {
+            setEventoLocal(e);
+            setEvento(e);
+          }
+        });
+      }
     } else if (location.state?.evento) {
       setEventoLocal(location.state.evento);
       setEvento(location.state.evento);

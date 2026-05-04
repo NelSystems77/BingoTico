@@ -9,7 +9,8 @@ import {
   desbloquearSpeechSynthesis,
   detenerKeepAliveIOS,
 } from '../utils/bingo';
-import { precargarGenero, detenerTodoAudio } from '../services/audioService';
+import { precargarGenero } from '../services/audioService';
+import { detenerTodoAudio } from '../utils/bingo';
 import { firebaseService } from '../services/firebase';
 import type { Partida } from '../types';
 

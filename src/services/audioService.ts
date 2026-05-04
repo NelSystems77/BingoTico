@@ -12,11 +12,12 @@
  *   • Los archivos NO se cargan al iniciar la app.
  *   • Cuando el usuario elige un género y arranca el juego, se llama a
  *     `precargarGenero()` que descarga en segundo plano todos los MP3 del
- *     género seleccionado y los guarda como objetos `Audio` en un Map.
+ *     género seleccionado y los guarda como URLs en un Map.
  *   • Cada número tiene dos variantes: base (N.mp3) y variación (N_var.mp3).
- *     Se elige aleatoriamente cuál reproducir, igual que con SpeechSynthesis.
- *   • Si el archivo aún no está en cache (p.ej. la precarga no terminó),
- *     se crea el objeto Audio al vuelo y se reproduce de inmediato.
+ *     Se elige aleatoriamente cuál reproducir.
+ *   • IMPORTANTE: En Safari/iOS y Android NO se reutilizan objetos Audio;
+ *     se crea un nuevo HTMLAudioElement en cada reproducción para evitar
+ *     el bloqueo de autoplay por reutilización de elementos.
  *   • Si el navegador no soporta Audio o hay un error de red, se devuelve
  *     `null` para que el llamador use SpeechSynthesis como fallback.
  * ─────────────────────────────────────────────────────────────────────────────
@@ -34,22 +35,20 @@ const BASE_PATHS: Record<GeneroAudio, string> = {
 const TOTAL_NUMEROS = 90;
 
 /**
- * Cada entrada del cache guarda los dos objetos Audio (base y variación)
- * para un número dado.
+ * Cache de URLs verificadas (fetch exitoso).
+ * Guardamos solo la URL, NO el objeto Audio, para evitar problemas
+ * de reutilización en Safari/iOS y Android.
  */
-interface EntradaCache {
-  base: HTMLAudioElement;
-  variacion: HTMLAudioElement;
-}
-
-/** Cache principal: género → número → EntradaCache */
-const cache = new Map<GeneroAudio, Map<number, EntradaCache>>();
+const cacheURLs = new Map<GeneroAudio, Map<number, { base: string; variacion: string }>>();
 
 /** Indica si la precarga de un género ya fue iniciada (evita doble fetch) */
 const precargaIniciada = new Set<GeneroAudio>();
 
 /** Indica si la precarga de un género ya completó todos los archivos */
 const precargaCompleta = new Set<GeneroAudio>();
+
+/** Elemento de audio actualmente en reproducción (para poder detenerlo) */
+let audioActivo: HTMLAudioElement | null = null;
 
 // ─── Helpers internos ────────────────────────────────────────────────────────
 
@@ -61,42 +60,20 @@ function urlAudio(genero: GeneroAudio, numero: number, variacion: boolean): stri
 }
 
 /**
- * Crea un HTMLAudioElement y lo precarga (preload="auto").
- * Devuelve una Promise que resuelve cuando el audio está listo para
- * reproducirse (evento `canplaythrough`) o rechaza si hay error.
+ * Verifica que una URL de audio sea accesible mediante fetch HEAD.
+ * Más confiable que HTMLAudioElement.canplaythrough en Safari/iOS.
+ * Devuelve la URL si es accesible, o null si falla.
  */
-function crearAudio(url: string): Promise<HTMLAudioElement> {
-  return new Promise((resolve, reject) => {
-    const audio = new Audio();
-    audio.preload = 'auto';
-
-    const onReady = () => {
-      audio.removeEventListener('canplaythrough', onReady);
-      audio.removeEventListener('error', onError);
-      resolve(audio);
-    };
-
-    const onError = () => {
-      audio.removeEventListener('canplaythrough', onReady);
-      audio.removeEventListener('error', onError);
-      reject(new Error(`Error cargando audio: ${url}`));
-    };
-
-    audio.addEventListener('canplaythrough', onReady, { once: true });
-    audio.addEventListener('error', onError, { once: true });
-    audio.src = url;
-    audio.load();
-  });
-}
-
-/**
- * Crea un HTMLAudioElement sin esperar a que esté listo.
- * Útil para reproducción inmediata cuando la precarga no terminó.
- */
-function crearAudioInmediato(url: string): HTMLAudioElement {
-  const audio = new Audio(url);
-  audio.preload = 'auto';
-  return audio;
+async function verificarURL(url: string): Promise<string | null> {
+  try {
+    const resp = await fetch(url, { method: 'HEAD', cache: 'force-cache' });
+    if (resp.ok) return url;
+    return null;
+  } catch {
+    // fetch puede fallar en algunos entornos (CORS, offline, etc.)
+    // En ese caso asumimos que la URL es válida para no bloquear el juego
+    return url;
+  }
 }
 
 // ─── API pública ─────────────────────────────────────────────────────────────
@@ -116,10 +93,10 @@ export async function precargarGenero(
   if (precargaIniciada.has(genero)) return; // ya en curso o completa
   precargaIniciada.add(genero);
 
-  if (!cache.has(genero)) {
-    cache.set(genero, new Map());
+  if (!cacheURLs.has(genero)) {
+    cacheURLs.set(genero, new Map());
   }
-  const mapaGenero = cache.get(genero)!;
+  const mapaGenero = cacheURLs.get(genero)!;
 
   const total = TOTAL_NUMEROS * 2; // base + variación por número
   let cargados = 0;
@@ -133,19 +110,26 @@ export async function precargarGenero(
     const promesas: Promise<void>[] = [];
 
     for (let n = inicio; n <= fin; n++) {
-      const num = n; // captura para closure
+      const num = n;
+      const urlBase = urlAudio(genero, num, false);
+      const urlVar  = urlAudio(genero, num, true);
+
       const p = Promise.all([
-        crearAudio(urlAudio(genero, num, false)),
-        crearAudio(urlAudio(genero, num, true)),
+        verificarURL(urlBase),
+        verificarURL(urlVar),
       ])
         .then(([base, variacion]) => {
-          mapaGenero.set(num, { base, variacion });
+          // Guardar las URLs verificadas (o las originales si fetch falló)
+          mapaGenero.set(num, {
+            base:     base     ?? urlBase,
+            variacion: variacion ?? urlVar,
+          });
           cargados += 2;
           onProgreso?.(cargados, total);
         })
-        .catch((err) => {
-          // Si falla un archivo, lo ignoramos silenciosamente
-          console.warn(`[AudioService] ${err.message}`);
+        .catch(() => {
+          // Si falla, guardar las URLs de todas formas
+          mapaGenero.set(num, { base: urlBase, variacion: urlVar });
           cargados += 2;
           onProgreso?.(cargados, total);
         });
@@ -163,89 +147,115 @@ export async function precargarGenero(
 /**
  * Reproduce el audio del número indicado para el género dado.
  *
- * • Si el archivo ya está en cache, lo reproduce directamente.
- * • Si aún no está en cache (precarga en curso), lo crea al vuelo.
- * • Elige aleatoriamente entre la versión base y la variación.
+ * CAMBIO CLAVE para Safari/iOS y Android:
+ * • Se crea un NUEVO HTMLAudioElement en cada reproducción.
+ *   Reutilizar el mismo elemento causa que Safari rechace play()
+ *   porque el elemento ya no está "fresco" desde la interacción del usuario.
+ * • Se retorna una Promise<boolean> que resuelve true si el audio
+ *   se reprodujo correctamente, false si falló (para activar TTS fallback).
  *
- * @returns El HTMLAudioElement que se está reproduciendo, o `null` si
- *          el navegador no soporta Audio (para usar fallback TTS).
+ * @returns Promise<boolean> — true = reproducción exitosa, false = falló
  */
 export function reproducirNumero(
   numero: number,
   genero: GeneroAudio
-): HTMLAudioElement | null {
-  if (typeof Audio === 'undefined') return null; // SSR / entorno sin Audio
+): Promise<boolean> {
+  if (typeof Audio === 'undefined') return Promise.resolve(false);
 
-  if (!cache.has(genero)) {
-    cache.set(genero, new Map());
+  // Detener audio anterior si existe
+  if (audioActivo) {
+    try {
+      audioActivo.pause();
+      audioActivo.src = '';
+    } catch {
+      // ignorar errores al detener
+    }
+    audioActivo = null;
   }
-  const mapaGenero = cache.get(genero)!;
 
   // Elegir aleatoriamente base o variación (50/50)
   const usarVariacion = Math.random() < 0.5;
 
-  let audioEl: HTMLAudioElement;
+  // Obtener URL del cache o construirla al vuelo
+  const mapaGenero = cacheURLs.get(genero);
+  let url: string;
 
-  if (mapaGenero.has(numero)) {
-    // ✅ Cache hit: usar el objeto precargado
+  if (mapaGenero?.has(numero)) {
     const entrada = mapaGenero.get(numero)!;
-    audioEl = usarVariacion ? entrada.variacion : entrada.base;
-
-    // Reiniciar si ya se reprodujo antes
-    audioEl.currentTime = 0;
+    url = usarVariacion ? entrada.variacion : entrada.base;
   } else {
-    // ⚡ Cache miss: crear al vuelo y guardar en cache para la próxima vez
-    const url = urlAudio(genero, numero, usarVariacion);
-    audioEl = crearAudioInmediato(url);
-
-    // Guardar ambas variantes en cache para uso futuro
-    const base      = crearAudioInmediato(urlAudio(genero, numero, false));
-    const variacion = crearAudioInmediato(urlAudio(genero, numero, true));
-    mapaGenero.set(numero, { base, variacion });
-
-    console.log(`[AudioService] Cache miss para ${genero}/${numero} — cargando al vuelo`);
+    // Cache miss: construir URL al vuelo
+    url = urlAudio(genero, numero, usarVariacion);
+    console.log(`[AudioService] Cache miss para ${genero}/${numero} — usando URL al vuelo`);
   }
 
-  // Detener cualquier reproducción anterior del mismo elemento
-  audioEl.pause();
-  audioEl.currentTime = 0;
+  // SIEMPRE crear un nuevo HTMLAudioElement (crítico para Safari/iOS y Android)
+  const audioEl = new Audio();
+  audioEl.preload = 'none'; // no precargar — solo reproducir cuando se llame play()
+  audioEl.src = url;
+  audioActivo = audioEl;
 
-  const promesaPlay = audioEl.play();
-  if (promesaPlay !== undefined) {
-    promesaPlay.catch((err) => {
-      // AutoPlay bloqueado por el navegador — el llamador debe usar TTS
-      console.warn(`[AudioService] play() bloqueado para ${genero}/${numero}:`, err);
-    });
-  }
+  return new Promise<boolean>((resolve) => {
+    const onError = () => {
+      cleanup();
+      console.warn(`[AudioService] Error reproduciendo ${genero}/${numero} (${url})`);
+      resolve(false);
+    };
 
-  return audioEl;
-}
+    const onEnded = () => {
+      cleanup();
+    };
 
-/**
- * Detiene toda reproducción activa del género indicado.
- * Útil al pausar el juego o cambiar de número.
- */
-export function detenerAudio(genero: GeneroAudio): void {
-  const mapaGenero = cache.get(genero);
-  if (!mapaGenero) return;
+    const cleanup = () => {
+      audioEl.removeEventListener('error', onError);
+      audioEl.removeEventListener('ended', onEnded);
+    };
 
-  mapaGenero.forEach(({ base, variacion }) => {
-    if (!base.paused) {
-      base.pause();
-      base.currentTime = 0;
-    }
-    if (!variacion.paused) {
-      variacion.pause();
-      variacion.currentTime = 0;
+    audioEl.addEventListener('error', onError, { once: true });
+    audioEl.addEventListener('ended', onEnded, { once: true });
+
+    // play() devuelve una Promise en navegadores modernos
+    const promesaPlay = audioEl.play();
+
+    if (promesaPlay !== undefined) {
+      promesaPlay
+        .then(() => {
+          // Reproducción iniciada correctamente
+          resolve(true);
+        })
+        .catch((err) => {
+          cleanup();
+          // AutoPlay bloqueado o error de red → fallback TTS
+          console.warn(`[AudioService] play() rechazado para ${genero}/${numero}:`, err);
+          resolve(false);
+        });
+    } else {
+      // Navegadores antiguos que no devuelven Promise (muy raro)
+      resolve(true);
     }
   });
 }
 
 /**
- * Detiene toda reproducción activa de cualquier género.
+ * Detiene toda reproducción activa.
  */
 export function detenerTodoAudio(): void {
-  cache.forEach((_, genero) => detenerAudio(genero));
+  if (audioActivo) {
+    try {
+      audioActivo.pause();
+      audioActivo.src = '';
+    } catch {
+      // ignorar
+    }
+    audioActivo = null;
+  }
+}
+
+/**
+ * Alias para compatibilidad con código existente.
+ */
+export function detenerAudio(_genero: GeneroAudio): void {
+  detenerTodoAudio();
 }
 
 /**
@@ -253,8 +263,8 @@ export function detenerTodoAudio(): void {
  * durante la sesión para liberar memoria).
  */
 export function limpiarCacheGenero(genero: GeneroAudio): void {
-  detenerAudio(genero);
-  cache.delete(genero);
+  detenerTodoAudio();
+  cacheURLs.delete(genero);
   precargaIniciada.delete(genero);
   precargaCompleta.delete(genero);
   console.log(`[AudioService] Cache liberado para voz ${genero}`);

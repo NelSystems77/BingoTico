@@ -3,6 +3,9 @@ import type { LlamadaBola } from '../types';
 import { reproducirNumero, detenerTodoAudio } from '../services/audioService';
 import type { GeneroAudio } from '../services/audioService';
 
+// Re-exportar detenerTodoAudio para que Juego.tsx lo siga importando desde aquí si lo necesita
+export { detenerTodoAudio };
+
 // Generar código único de cartón
 export function generarCodigoCarton(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Sin I, O, 0, 1
@@ -1065,8 +1068,16 @@ export function hablarNumero(numero: number, voz: 'masculina' | 'femenina'): voi
  *
  * Flujo:
  *  1. Intenta reproducir el MP3 del género seleccionado via audioService.
- *  2. Si `reproducirNumero()` devuelve null (Audio no soportado) → TTS.
- *  3. Si play() falla (autoplay bloqueado, archivo no encontrado) → TTS.
+ *  2. audioService.reproducirNumero() devuelve Promise<boolean>:
+ *     - true  → reproducción iniciada correctamente, no hacer nada más.
+ *     - false → Audio no soportado, autoplay bloqueado o error de red
+ *               → activar TTS como fallback.
+ *
+ * IMPORTANTE para Safari/iOS y Android:
+ *  • NO se llama detenerTodoAudio() antes de reproducirNumero() porque
+ *    en Safari eso puede romper el contexto de audio del gesto del usuario.
+ *  • audioService ya detiene el audio anterior internamente al crear
+ *    el nuevo HTMLAudioElement.
  *
  * @param numero  Número de bola (1–90)
  * @param voz     Género de la voz: 'masculina' | 'femenina'
@@ -1075,24 +1086,12 @@ export function hablarNumeroConAudio(
   numero: number,
   voz: GeneroAudio
 ): void {
-  // Detener cualquier audio MP3 que esté sonando
-  detenerTodoAudio();
-
-  // Intentar reproducir MP3
-  const audioEl = reproducirNumero(numero, voz);
-
-  if (audioEl === null) {
-    // Audio API no disponible → usar TTS directamente
-    hablarNumero(numero, voz);
-    return;
-  }
-
-  // Escuchar si play() falla para activar el fallback TTS
-  const onError = () => {
-    audioEl.removeEventListener('error', onError);
-    console.warn(`[BingoTico] MP3 falló para ${voz}/${numero} — usando TTS como fallback`);
-    hablarNumero(numero, voz);
-  };
-
-  audioEl.addEventListener('error', onError, { once: true });
+  // reproducirNumero() ahora devuelve Promise<boolean>
+  // true = MP3 reproduciéndose, false = falló → usar TTS
+  reproducirNumero(numero, voz).then((exito) => {
+    if (!exito) {
+      console.warn(`[BingoTico] MP3 no disponible para ${voz}/${numero} — usando TTS como fallback`);
+      hablarNumero(numero, voz);
+    }
+  });
 }

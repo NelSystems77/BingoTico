@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useGameStore } from '../stores/gameStore';
 import { useConfigStore } from '../stores/configStore';
@@ -26,50 +26,12 @@ export default function Juego() {
   const [partida, setPartida] = useState<Partida | null>(null);
   /** Progreso de precarga de audio (0–100). 100 = listo. */
   const [progresoCarga, setProgresoCarga] = useState(0);
-  /** Palabras visibles de la frase cantada (sincronización con audio) */
-  const [palabrasVisibles, setPalabrasVisibles] = useState(0);
-  /** Frase actual dividida en palabras */
-  const [palabrasFrase, setPalabrasFrase] = useState<string[]>([]);
 
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
-  const palabrasTimerRef = useRef<NodeJS.Timeout | null>(null);
   const audioDesbloqueadoRef = useRef(false);
   // Ref para acceder al partida actual dentro del intervalo sin stale closure
   const partidaRef = useRef<Partida | null>(null);
   useEffect(() => { partidaRef.current = partida; }, [partida]);
-
-  // ── Animación de palabras sincronizada con el audio ──────────────
-  /**
-   * Revela las palabras de la frase una a una, simulando la velocidad
-   * del locutor. Usa ~120 ms por carácter como base (habla natural),
-   * con un mínimo de 220 ms y máximo de 600 ms por palabra.
-   */
-  const animarPalabras = useCallback((frase: string) => {
-    // Cancelar animación anterior si la hubiera
-    if (palabrasTimerRef.current) clearTimeout(palabrasTimerRef.current);
-
-    const palabras = frase.split(' ');
-    setPalabrasFrase(palabras);
-    setPalabrasVisibles(0);
-
-    let idx = 0;
-
-    const mostrarSiguiente = () => {
-      idx++;
-      setPalabrasVisibles(idx);
-
-      if (idx < palabras.length) {
-        // Tiempo proporcional a la longitud de la palabra siguiente
-        const palabra = palabras[idx] ?? '';
-        const ms = Math.min(Math.max(palabra.length * 120, 220), 600);
-        palabrasTimerRef.current = setTimeout(mostrarSiguiente, ms);
-      }
-    };
-
-    // Pequeño delay inicial para que coincida con el comienzo del audio
-    const primeraMs = Math.min(Math.max((palabras[0]?.length ?? 3) * 120, 220), 600);
-    palabrasTimerRef.current = setTimeout(mostrarSiguiente, primeraMs);
-  }, []);
 
   // ── iOS Safari: desbloquear speechSynthesis con el primer gesto ──
   const desbloquearAudio = () => {
@@ -150,10 +112,6 @@ export default function Juego() {
     const nuevaBola = sorteo.sortearBola();
     setBolaActual(nuevaBola);
     setBolasExtraidas([...sorteo.getBolasSorteadas()]);
-
-    // Obtener la frase y arrancar la animación de palabras
-    const llamadaNueva = obtenerLlamadaBola(nuevaBola);
-    animarPalabras(llamadaNueva.call);
 
     // Reproducir audio MP3 (lazy loading) con fallback a TTS
     if (config.sonido) {
@@ -338,30 +296,12 @@ export default function Juego() {
                   </div>
 
                   <div className="text-center">
-                    {/* Frase sincronizada palabra a palabra con el audio */}
                     <p className="text-3xl font-bold text-white mb-2" style={{
                       textShadow: '0 2px 8px rgba(0,0,0,0.6)',
                       fontFamily: 'Bebas Neue, sans-serif',
                       letterSpacing: '1px',
-                      minHeight: '2.5rem',
                     }}>
-                      {palabrasFrase.length > 0
-                        ? palabrasFrase.map((palabra, i) => (
-                            <span
-                              key={i}
-                              style={{
-                                opacity: i < palabrasVisibles ? 1 : 0,
-                                transform: i < palabrasVisibles ? 'translateY(0)' : 'translateY(8px)',
-                                display: 'inline-block',
-                                transition: 'opacity 0.18s ease, transform 0.18s ease',
-                                marginRight: i < palabrasFrase.length - 1 ? '0.25em' : 0,
-                              }}
-                            >
-                              {palabra}
-                            </span>
-                          ))
-                        : (llamada?.call || `Número ${bolaActual}`)
-                      }
+                      {llamada?.call || `Número ${bolaActual}`}
                     </p>
 
                     {config.repetirBola && (

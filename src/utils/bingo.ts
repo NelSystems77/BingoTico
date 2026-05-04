@@ -763,19 +763,6 @@ const VOCES_FEMENINAS = [
   'female', 'mujer', 'femenin',
 ];
 
-// Voces masculinas en inglés conocidas (fallback para iOS cuando no hay voz
-// masculina en español disponible — suenan mucho mejor que bajar el pitch)
-const VOCES_MASCULINAS_EN = [
-  'daniel',   // iOS en-GB — voz masculina de alta calidad
-  'alex',     // macOS/iOS en-US — voz masculina clásica
-  'fred',     // macOS en-US
-  'tom',      // macOS en-US
-  'oliver',   // iOS en-GB
-  'arthur',   // iOS en-GB
-  'gordon',   // iOS en-AU
-  'rishi',    // iOS en-IN
-];
-
 /**
  * Determina si una voz es masculina según su nombre.
  */
@@ -793,25 +780,14 @@ function esVozFemenina(voice: SpeechSynthesisVoice): boolean {
 }
 
 /**
- * Busca la mejor voz masculina en inglés disponible (fallback para iOS/Android
- * cuando no hay voz masculina en español).
- */
-function buscarVozMasculinaIngles(): SpeechSynthesisVoice | null {
-  const voices = speechSynthesis.getVoices();
-  for (const nombreBuscado of VOCES_MASCULINAS_EN) {
-    const voz = voices.find(v => v.name.toLowerCase().includes(nombreBuscado));
-    if (voz) return voz;
-  }
-  return null;
-}
-
-/**
- * Selecciona la mejor voz en español disponible en el dispositivo,
+ * Selecciona la mejor voz en ESPAÑOL disponible en el dispositivo,
  * intentando respetar la preferencia de género.
+ * Nunca usa voces en inglés — siempre español para sonar natural.
  *
  * Estrategia por plataforma:
  * - Android masculina: busca "Google español" (voz neutra/masculina nativa)
- * - iOS masculina: busca "Jorge" → fallback a voz masculina en inglés
+ * - iOS masculina: busca "Jorge"; si no existe, usa la mejor voz española
+ *   disponible (Paulina) con pitch ajustado en dispararUtterance()
  * - Femenina: busca por nombres femeninos conocidos
  * Prioridad locale: es-CR > es-MX > es-US > es-ES > cualquier es-*
  */
@@ -819,6 +795,7 @@ function seleccionarVoz(genero: 'masculina' | 'femenina'): SpeechSynthesisVoice 
   const voices = speechSynthesis.getVoices();
   if (voices.length === 0) return null;
 
+  // Solo voces en español — nunca inglés
   const esVoices = voices.filter(v => v.lang.startsWith('es'));
   const pool = esVoices.length > 0 ? esVoices : voices;
   const localePrefs = ['es-CR', 'es-MX', 'es-US', 'es-ES', 'es-419'];
@@ -826,10 +803,8 @@ function seleccionarVoz(genero: 'masculina' | 'femenina'): SpeechSynthesisVoice 
   if (genero === 'masculina') {
     // ── Android: estrategia especial ──────────────────────────────────────
     if (esAndroid()) {
-      // En Android, Google TTS expone voces con nombres como:
-      // "Google español de Estados Unidos", "Google español", etc.
-      // Estas son voces neutras/masculinas de alta calidad.
-      // Buscamos primero por nombre "google" + "español"
+      // Google TTS expone voces como "Google español de Estados Unidos"
+      // que son neutras/masculinas de alta calidad nativa
       const googleEs = voices.find(v => {
         const n = v.name.toLowerCase();
         return n.includes('google') && (n.includes('español') || n.includes('espanol') || n.includes('es-'));
@@ -850,10 +825,14 @@ function seleccionarVoz(genero: 'masculina' | 'femenina'): SpeechSynthesisVoice 
       const jorge = voices.find(v => v.name.toLowerCase().includes('jorge'));
       if (jorge) return jorge;
 
-      // iOS no tiene buena voz masculina en español → usar voz masculina en inglés
-      // (suena MUCHO mejor que bajar el pitch de Paulina)
-      const vozEnIngles = buscarVozMasculinaIngles();
-      if (vozEnIngles) return vozEnIngles;
+      // iOS sin Jorge: usar la mejor voz española disponible (Paulina u otra).
+      // dispararUtterance() aplicará pitch 0.78 para masculinizarla de forma
+      // natural sin sonar robótico ni con acento extranjero.
+      for (const locale of localePrefs) {
+        const match = pool.find(v => v.lang === locale);
+        if (match) return match;
+      }
+      return pool.find(v => v.localService) ?? pool[0] ?? null;
     }
 
     // ── Desktop y fallback general ────────────────────────────────────────
@@ -870,11 +849,7 @@ function seleccionarVoz(genero: 'masculina' | 'femenina'): SpeechSynthesisVoice 
       return porGenero.find(v => v.localService) ?? porGenero[0];
     }
 
-    // 3. Sin voz masculina encontrada → voz masculina en inglés como último recurso
-    const vozEnIngles = buscarVozMasculinaIngles();
-    if (vozEnIngles) return vozEnIngles;
-
-    // 4. Último recurso: cualquier voz española
+    // 3. Sin voz masculina → mejor voz española disponible
     for (const locale of localePrefs) {
       const match = pool.find(v => v.lang === locale);
       if (match) return match;
@@ -914,33 +889,30 @@ function dispararUtterance(texto: string, voz: 'masculina' | 'femenina'): void {
   const utterance = new SpeechSynthesisUtterance(texto);
 
   utterance.volume = 1;
+  utterance.lang   = 'es-US';
 
   const selectedVoice = seleccionarVoz(voz);
+
+  // Detectar si la voz seleccionada es realmente masculina
+  // (Android Google TTS, Jorge, Windows Pablo…)
+  const vozEsMasculinaReal = selectedVoice ? esVozMasculina(selectedVoice) : false;
 
   if (esFemenina) {
     // Voz femenina: pitch ligeramente alto, velocidad natural
     utterance.pitch = 1.15 + Math.random() * 0.10;
     utterance.rate  = 0.82 + Math.random() * 0.13;
-    utterance.lang  = 'es-US';
   } else {
-    // Voz masculina
-    const esVozIngles = selectedVoice
-      ? selectedVoice.lang.startsWith('en')
-      : false;
-
-    if (esVozIngles) {
-      // Voz masculina en inglés (fallback iOS/Android):
-      // pitch natural masculino, velocidad un poco más lenta para que
-      // el español suene más claro con motor inglés
-      utterance.pitch = 0.90 + Math.random() * 0.10;
-      utterance.rate  = 0.72 + Math.random() * 0.10;
-      utterance.lang  = selectedVoice!.lang;
-    } else {
-      // Voz masculina en español (Android Google TTS, Jorge, Windows Pablo…):
-      // pitch natural, sin manipulación agresiva
-      utterance.pitch = 0.90 + Math.random() * 0.10;
+    if (vozEsMasculinaReal) {
+      // Voz masculina real en español (Android Google TTS, Jorge, Pablo…):
+      // pitch completamente natural, sin manipulación
+      utterance.pitch = 0.92 + Math.random() * 0.08;
       utterance.rate  = 0.82 + Math.random() * 0.13;
-      utterance.lang  = 'es-US';
+    } else {
+      // Voz femenina española usada para masculino (iOS sin Jorge, fallback):
+      // pitch 0.78 — suficientemente bajo para sonar masculino pero sin
+      // sonar robótico. Rate ligeramente más lento da más gravedad natural.
+      utterance.pitch = 0.76 + Math.random() * 0.06;
+      utterance.rate  = 0.78 + Math.random() * 0.08;
     }
   }
 

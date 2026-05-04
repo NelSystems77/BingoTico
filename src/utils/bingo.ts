@@ -717,34 +717,70 @@ export function verificarBingo(numeros: number[][], numerosExtraidos: number[]):
 // WRAPPER INTELIGENTE DE VOZ
 // Detecta, clasifica y cachea automáticamente las mejores voces
 // disponibles en el dispositivo, respetando la elección del usuario.
+// Compatible con Safari/iOS, Android Chrome y escritorio.
 // ============================================================
+
+// ── Normalización de texto para comparación ──────────────────────────────────
+
+/**
+ * Elimina tildes/diacríticos y convierte a minúsculas.
+ * Permite comparar "Mónica" con "monica", "José" con "jose", etc.
+ */
+function normalizarTexto(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
 
 // ── Palabras clave para clasificar voces por género ──────────────────────────
 
-/** Tokens que indican voz masculina en el nombre de la voz */
+/** Tokens que indican voz masculina en el nombre de la voz (ya normalizados) */
 const TOKENS_MASCULINOS = [
-  // Nombres propios masculinos (iOS/macOS/Windows)
+  // Nombres propios masculinos (iOS/macOS/Windows/Android)
   'jorge', 'diego', 'carlos', 'juan', 'miguel', 'antonio', 'alejandro',
   'enrique', 'felipe', 'francisco', 'gabriel', 'javier', 'jose', 'luis',
   'manuel', 'pablo', 'pedro', 'rafael', 'roberto', 'sergio', 'andres',
   'alberto', 'daniel', 'david', 'eduardo', 'ernesto', 'fernando', 'gonzalo',
-  'hector', 'ignacio', 'ivan', 'jesus', 'jorge', 'julio', 'mario', 'oscar',
-  'raul', 'ricardo', 'rodrigo', 'victor',
+  'hector', 'ignacio', 'ivan', 'jesus', 'julio', 'mario', 'oscar',
+  'raul', 'ricardo', 'rodrigo', 'victor', 'angel', 'cesar', 'emilio',
+  'gerardo', 'gustavo', 'hugo', 'jaime', 'leo', 'marcos', 'martin',
+  'nicolas', 'omar', 'rene', 'ruben', 'salvador', 'tomas',
   // Indicadores genéricos
   'male', 'hombre', 'masculin', 'masc',
 ];
 
-/** Tokens que indican voz femenina en el nombre de la voz */
+/** Tokens que indican voz femenina en el nombre de la voz (ya normalizados) */
 const TOKENS_FEMENINOS = [
   // Nombres propios femeninos (iOS/macOS/Windows/Android)
-  'paulina', 'monica', 'mónica', 'luciana', 'valentina', 'sofia', 'sofía',
-  'isabella', 'camila', 'laura', 'maria', 'maría', 'ana', 'elena', 'rosa',
-  'carmen', 'pilar', 'conchita', 'ximena', 'fernanda', 'andrea', 'patricia',
-  'sabina', 'helena', 'alicia', 'beatriz', 'claudia', 'diana', 'gabriela',
-  'isabel', 'jessica', 'karen', 'lola', 'lucia', 'lucía', 'mariana',
+  'paulina', 'monica', 'luciana', 'valentina', 'sofia', 'isabella',
+  'camila', 'laura', 'maria', 'ana', 'elena', 'rosa', 'carmen', 'pilar',
+  'conchita', 'ximena', 'fernanda', 'andrea', 'patricia', 'sabina',
+  'helena', 'alicia', 'beatriz', 'claudia', 'diana', 'gabriela',
+  'isabel', 'jessica', 'karen', 'lola', 'lucia', 'mariana',
   'natalia', 'paola', 'sandra', 'silvia', 'susana', 'teresa', 'veronica',
+  'marisol', 'esperanza', 'dolores', 'amparo', 'rocio', 'yolanda',
+  'lorena', 'miriam', 'nuria', 'olga', 'raquel', 'rebeca', 'sonia',
   // Indicadores genéricos
   'female', 'mujer', 'femenin', 'fem',
+];
+
+/**
+ * Voces de Android/Google TTS que se sabe son femeninas por su identificador
+ * interno (los nombres no contienen nombres propios).
+ * Patrones en el voiceURI o name de Android Google TTS.
+ */
+const PATRONES_FEMENINOS_ANDROID = [
+  // Google TTS en español — las variantes "f" son femeninas
+  /es[-_][a-z]{2}[-_]x[-_][a-z]*f/i,   // es-us-x-sfg, es-es-x-eef, etc.
+  /female/i,
+  /\bf\b/,                               // sufijo "f" aislado
+];
+
+const PATRONES_MASCULINOS_ANDROID = [
+  /es[-_][a-z]{2}[-_]x[-_][a-z]*m/i,   // es-us-x-sfm, es-es-x-eem, etc.
+  /male/i,
+  /\bm\b/,                               // sufijo "m" aislado
 ];
 
 /** Prioridad de locales en español (de más a menos preferido) */
@@ -762,13 +798,25 @@ let cacheVoces: { masculina?: VozCacheEntry; femenina?: VozCacheEntry } = {};
 let cacheInicializado = false;
 
 /**
- * Clasifica una voz como masculina, femenina o desconocida
- * basándose en su nombre.
+ * Clasifica una voz como masculina, femenina o desconocida.
+ * Usa normalización de acentos para máxima compatibilidad con
+ * nombres de voces en iOS (Mónica, José, etc.) y Android.
  */
 function clasificarVoz(v: SpeechSynthesisVoice): 'masculina' | 'femenina' | 'desconocida' {
-  const n = v.name.toLowerCase();
-  if (TOKENS_MASCULINOS.some(t => n.includes(t))) return 'masculina';
-  if (TOKENS_FEMENINOS.some(t => n.includes(t))) return 'femenina';
+  // Normalizar nombre y voiceURI para comparación sin acentos
+  const nombre = normalizarTexto(v.name);
+  const uri    = normalizarTexto(v.voiceURI ?? '');
+  const haystack = `${nombre} ${uri}`;
+
+  // 1. Buscar tokens de nombre propio/genérico (normalizados)
+  if (TOKENS_MASCULINOS.some(t => haystack.includes(t))) return 'masculina';
+  if (TOKENS_FEMENINOS.some(t => haystack.includes(t))) return 'femenina';
+
+  // 2. Patrones de Android Google TTS (basados en el voiceURI/name original)
+  const original = `${v.name} ${v.voiceURI ?? ''}`;
+  if (PATRONES_FEMENINOS_ANDROID.some(p => p.test(original))) return 'femenina';
+  if (PATRONES_MASCULINOS_ANDROID.some(p => p.test(original))) return 'masculina';
+
   return 'desconocida';
 }
 
@@ -784,7 +832,12 @@ function mejorVozDeLista(lista: SpeechSynthesisVoice[]): SpeechSynthesisVoice | 
     const remota = lista.find(v => v.lang === locale);
     if (remota) return remota;
   }
-  // Cualquier locale es-*
+  // Cualquier locale es-* (local primero)
+  const cualquierLocal = lista.find(v => v.lang.startsWith('es') && v.localService);
+  if (cualquierLocal) return cualquierLocal;
+  const cualquierEs = lista.find(v => v.lang.startsWith('es'));
+  if (cualquierEs) return cualquierEs;
+  // Último recurso: primera disponible
   return lista.find(v => v.localService) ?? lista[0];
 }
 
@@ -804,25 +857,29 @@ function inicializarCacheVoces(): void {
   // Log de diagnóstico — visible en DevTools del dispositivo
   console.group('[BingoTico] Voces disponibles en este dispositivo');
   pool.forEach(v =>
-    console.log(`  ${clasificarVoz(v).padEnd(12)} | ${v.lang.padEnd(8)} | local=${v.localService ? 'sí' : 'no'} | ${v.name}`)
+    console.log(
+      `  ${clasificarVoz(v).padEnd(12)} | ${v.lang.padEnd(8)} | local=${v.localService ? 'sí' : 'no'} | ${v.name} | uri=${v.voiceURI}`
+    )
   );
   console.groupEnd();
 
-  const masculinas  = pool.filter(v => clasificarVoz(v) === 'masculina');
-  const femeninas   = pool.filter(v => clasificarVoz(v) === 'femenina');
+  const masculinas   = pool.filter(v => clasificarVoz(v) === 'masculina');
+  const femeninas    = pool.filter(v => clasificarVoz(v) === 'femenina');
   const desconocidas = pool.filter(v => clasificarVoz(v) === 'desconocida');
+
+  console.log(`[BingoTico] Clasificación: ${masculinas.length} masculinas, ${femeninas.length} femeninas, ${desconocidas.length} desconocidas`);
 
   // ── Voz masculina ────────────────────────────────────────────────────────
   const vozMasc = mejorVozDeLista(masculinas);
   if (vozMasc) {
     cacheVoces.masculina = { voice: vozMasc, esNativa: true };
-    console.log(`[BingoTico] Voz masculina seleccionada: "${vozMasc.name}" (${vozMasc.lang})`);
+    console.log(`[BingoTico] ✅ Voz masculina: "${vozMasc.name}" (${vozMasc.lang})`);
   } else {
     // No hay voz masculina → usar femenina o desconocida con pitch ajustado
     const fallback = mejorVozDeLista(femeninas) ?? mejorVozDeLista(desconocidas);
     if (fallback) {
       cacheVoces.masculina = { voice: fallback, esNativa: false };
-      console.warn(`[BingoTico] Sin voz masculina. Fallback: "${fallback.name}" (${fallback.lang}) — se ajustará pitch`);
+      console.warn(`[BingoTico] ⚠️ Sin voz masculina. Fallback: "${fallback.name}" (${fallback.lang}) — pitch ajustado`);
     }
   }
 
@@ -830,13 +887,13 @@ function inicializarCacheVoces(): void {
   const vozFem = mejorVozDeLista(femeninas);
   if (vozFem) {
     cacheVoces.femenina = { voice: vozFem, esNativa: true };
-    console.log(`[BingoTico] Voz femenina seleccionada: "${vozFem.name}" (${vozFem.lang})`);
+    console.log(`[BingoTico] ✅ Voz femenina: "${vozFem.name}" (${vozFem.lang})`);
   } else {
     // No hay voz femenina → usar masculina o desconocida
     const fallback = mejorVozDeLista(masculinas) ?? mejorVozDeLista(desconocidas);
     if (fallback) {
       cacheVoces.femenina = { voice: fallback, esNativa: false };
-      console.warn(`[BingoTico] Sin voz femenina. Fallback: "${fallback.name}" (${fallback.lang})`);
+      console.warn(`[BingoTico] ⚠️ Sin voz femenina. Fallback: "${fallback.name}" (${fallback.lang}) — pitch ajustado`);
     }
   }
 
@@ -854,8 +911,13 @@ function obtenerVozCache(genero: 'masculina' | 'femenina'): VozCacheEntry | null
   return cacheVoces[genero] ?? null;
 }
 
-// Registrar listener para cuando las voces carguen (necesario en Chrome/Android)
+// ── Listener para carga asíncrona de voces (Chrome/Android/Safari) ───────────
+// En Android Chrome y Safari las voces no están disponibles de inmediato;
+// onvoiceschanged se dispara cuando terminan de cargar.
 if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+  // Intento inmediato (funciona en Firefox y algunos escritorios)
+  inicializarCacheVoces();
+
   speechSynthesis.onvoiceschanged = () => {
     // Reinicializar cache cuando cambie la lista de voces
     cacheVoces = {};
@@ -873,6 +935,10 @@ if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
  * - Voz femenina real   → pitch alto (1.10–1.25), rate normal
  * - Fallback femenina→masculino → pitch 0.74–0.82, rate ligeramente lento
  * - Fallback masculina→femenino → pitch 1.20–1.30, rate ligeramente rápido
+ *
+ * NOTA sobre Safari/iOS: el pitch solo tiene efecto real cuando NO se
+ * asigna una voz explícita (Safari ignora pitch con voces nativas).
+ * Por eso en iOS con voz nativa del género correcto no se fuerza pitch.
  */
 function dispararUtterance(texto: string, genero: 'masculina' | 'femenina'): void {
   const utterance = new SpeechSynthesisUtterance(texto);
@@ -887,7 +953,7 @@ function dispararUtterance(texto: string, genero: 'masculina' | 'femenina'): voi
       utterance.pitch = 0.92 + Math.random() * 0.08;
       utterance.rate  = 0.82 + Math.random() * 0.13;
     } else {
-      // Fallback (voz femenina usada para masculino):
+      // Fallback (voz femenina/desconocida usada para masculino):
       // pitch 0.74–0.82 → suena masculino sin sonar robótico
       utterance.pitch = 0.74 + Math.random() * 0.08;
       utterance.rate  = 0.76 + Math.random() * 0.08;
@@ -898,7 +964,7 @@ function dispararUtterance(texto: string, genero: 'masculina' | 'femenina'): voi
       utterance.pitch = 1.12 + Math.random() * 0.13;
       utterance.rate  = 0.82 + Math.random() * 0.13;
     } else {
-      // Fallback (voz masculina usada para femenino):
+      // Fallback (voz masculina/desconocida usada para femenino):
       utterance.pitch = 1.25 + Math.random() * 0.10;
       utterance.rate  = 0.88 + Math.random() * 0.10;
     }

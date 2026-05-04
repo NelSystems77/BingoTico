@@ -6,10 +6,9 @@ import { SorteoEngine } from '../core/game-engine/core/sorteo.engine';
 import {
   obtenerLlamadaBola,
   hablarNumeroConAudio,
-  desbloquearSpeechSynthesis,
   detenerKeepAliveIOS,
 } from '../utils/bingo';
-import { precargarGenero, desbloquearAudioElement, limpiarCacheGenero } from '../services/audioService';
+import { precargarGenero, desbloquearAudioContext, limpiarCacheGenero } from '../services/audioService';
 import { detenerTodoAudio } from '../utils/bingo';
 import { firebaseService } from '../services/firebase';
 import type { Partida } from '../types';
@@ -39,12 +38,11 @@ export default function Juego() {
   // más reciente de extraerBola (con el config.voz actual).
   const extraerBolaRef = useRef<() => void>(() => {});
 
-  // ── iOS Safari: desbloquear speechSynthesis Y HTMLAudioElement con el primer gesto ──
+  // ── iOS Safari: desbloquear AudioContext con el primer gesto del usuario ──
   const desbloquearAudio = () => {
     if (audioDesbloqueadoRef.current) return;
     audioDesbloqueadoRef.current = true;
-    desbloquearSpeechSynthesis();
-    desbloquearAudioElement(); // desbloquear HTMLAudioElement para Safari/Android
+    desbloquearAudioContext(); // desbloquear AudioContext para Safari/Android
   };
 
   // ── Precarga lazy de audio al montar el componente ───────────────

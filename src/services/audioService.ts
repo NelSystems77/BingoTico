@@ -8,30 +8,28 @@
  *   /audio/numbers-male/     → voz masculina  (1.mp3, 1_var.mp3 … 90.mp3, 90_var.mp3)
  *   /audio/numbers-female/   → voz femenina   (1.mp3, 1_var.mp3 … 90.mp3, 90_var.mp3)
  *
- * Estrategia de lazy loading:
- *   • Los archivos NO se cargan al iniciar la app.
- *   • Cuando el usuario elige un género y arranca el juego, se llama a
- *     `precargarGenero()` que registra las URLs en el cache y opcionalmente
- *     precarga los primeros números con HTMLAudioElement para reducir latencia.
+ * ESTRATEGIA DE REPRODUCCIÓN:
+ *   • Se usa Web Audio API (AudioContext + fetch + decodeAudioData) como
+ *     mecanismo principal de reproducción.
+ *   • A diferencia de HTMLAudioElement.play(), el AudioContext mantiene el
+ *     permiso de reproducción activo después del primer gesto del usuario,
+ *     lo que permite reproducir audio desde setInterval o código asíncrono
+ *     en iOS Safari sin que el navegador rechace la reproducción.
+ *   • El AudioContext se desbloquea llamando desbloquearAudioContext() desde
+ *     un handler de evento de usuario (tap/click).
+ *   • Los AudioBuffer se cachean en memoria para evitar re-descargas.
  *   • Cada número tiene dos variantes: base (N.mp3) y variación (N_var.mp3).
  *     Se elige aleatoriamente cuál reproducir.
- *   • IMPORTANTE: En Safari (iOS y macOS) y Android NO se reutilizan objetos
- *     Audio; se crea un nuevo HTMLAudioElement en cada reproducción para evitar
- *     el bloqueo de autoplay por reutilización de elementos.
- *   • Si el navegador no soporta Audio o hay un error de red, se devuelve
- *     `false` para que el llamador use SpeechSynthesis como fallback.
  *
- * CAMBIOS v3 (fix Safari macOS + Android):
- *   • esSafari() ahora detecta TANTO Safari iOS como Safari macOS (desktop).
- *     Antes solo se detectaba iOS, dejando Safari de escritorio sin el fix.
- *   • reproducirNumero() ahora espera el evento `canplay` antes de llamar
- *     play(). En Safari (iOS/macOS) y Android, llamar play() inmediatamente
- *     después de asignar src puede lanzar NotSupportedError / AbortError
- *     porque el navegador no ha cargado suficientes datos aún.
- *   • Se añade un timeout de seguridad (CANPLAY_TIMEOUT_MS) para que si
- *     `canplay` nunca llega (red lenta, archivo inexistente) se intente
- *     play() de todas formas y se capture el error correctamente.
- *   • _precalentarPrimeros() ahora se ejecuta también en Safari macOS.
+ * CAMBIOS v4 (fix iOS Safari autoplay desde setInterval):
+ *   • Reemplaza HTMLAudioElement por Web Audio API (AudioContext).
+ *   • HTMLAudioElement.play() en iOS Safari solo funciona si se llama
+ *     directamente desde un handler de gesto del usuario. Desde setInterval
+ *     o .then() de una Promise, Safari rechaza play() con NotAllowedError.
+ *   • AudioContext NO tiene esta restricción: una vez desbloqueado con el
+ *     primer gesto, puede reproducir audio desde cualquier contexto asíncrono.
+ *   • Se mantiene desbloquearAudioElement() como alias vacío para no romper
+ *     imports existentes en Juego.tsx.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -46,18 +44,42 @@ const BASE_PATHS: Record<GeneroAudio, string> = {
 /** Números disponibles (1–90) */
 const TOTAL_NUMEROS = 90;
 
+// ─── Web Audio API ────────────────────────────────────────────────────────────
+
+/** AudioContext compartido para toda la app */
+let audioCtx: AudioContext | null = null;
+
+/** Nodo de ganancia activo (para poder detener el audio en curso) */
+let sourceActivo: AudioBufferSourceNode | null = null;
+
 /**
- * Tiempo máximo (ms) que esperamos el evento `canplay` antes de intentar
- * play() de todas formas. Evita que una red lenta bloquee indefinidamente.
+ * Obtiene (o crea) el AudioContext compartido.
+ * En iOS Safari el AudioContext debe crearse desde un handler de gesto
+ * del usuario para que quede desbloqueado.
  */
-const CANPLAY_TIMEOUT_MS = 3000;
+function obtenerAudioContext(): AudioContext | null {
+  if (typeof AudioContext === 'undefined' && typeof (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext === 'undefined') {
+    return null;
+  }
+  if (!audioCtx) {
+    const AC = (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext ?? AudioContext;
+    audioCtx = new AC();
+  }
+  return audioCtx;
+}
+
+// ─── Cache de URLs y AudioBuffers ────────────────────────────────────────────
 
 /**
  * Cache de URLs (registradas sin verificación de red).
- * Guardamos solo la URL, NO el objeto Audio, para evitar problemas
- * de reutilización en Safari/iOS y Android.
  */
 const cacheURLs = new Map<GeneroAudio, Map<number, { base: string; variacion: string }>>();
+
+/**
+ * Cache de AudioBuffers decodificados.
+ * Clave: URL del archivo MP3.
+ */
+const cacheBuffers = new Map<string, AudioBuffer>();
 
 /** Indica si la precarga de un género ya fue iniciada (evita doble ejecución) */
 const precargaIniciada = new Set<GeneroAudio>();
@@ -67,13 +89,8 @@ const precargaCompleta = new Set<GeneroAudio>();
 
 /**
  * Callbacks de progreso pendientes para cuando la precarga está en curso.
- * Permite que múltiples llamadores (p.ej. React StrictMode monta dos veces)
- * reciban actualizaciones de progreso aunque la precarga ya haya sido iniciada.
  */
 const callbacksPendientes = new Map<GeneroAudio, Array<(cargados: number, total: number) => void>>();
-
-/** Elemento de audio actualmente en reproducción (para poder detenerlo) */
-let audioActivo: HTMLAudioElement | null = null;
 
 // ─── Helpers internos ────────────────────────────────────────────────────────
 
@@ -85,38 +102,32 @@ function urlAudio(genero: GeneroAudio, numero: number, variacion: boolean): stri
 }
 
 /**
- * Detecta Safari en cualquier plataforma: iOS (iPhone/iPad/iPod) y macOS.
- *
- * Criterios:
- *  - iOS Safari:     contiene "iP(hone|od|ad)" + "WebKit" y NO es CriOS/FxiOS/OPiOS
- *  - macOS Safari:   contiene "Safari" + "Macintosh" + "WebKit" y NO es Chrome/Chromium/Firefox
- *
- * NOTA: Chrome en macOS incluye "Safari" en su UA pero también incluye "Chrome",
- * por eso excluimos explícitamente Chrome/Chromium/Edg/Firefox/OPR.
+ * Descarga y decodifica un MP3 como AudioBuffer.
+ * Cachea el resultado para evitar re-descargas.
  */
-function esSafari(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  const ua = navigator.userAgent;
+async function obtenerBuffer(url: string): Promise<AudioBuffer | null> {
+  // Retornar del cache si ya está decodificado
+  if (cacheBuffers.has(url)) {
+    return cacheBuffers.get(url)!;
+  }
 
-  // iOS Safari (iPhone, iPad, iPod)
-  const esIOSSafari =
-    /iP(hone|od|ad)/i.test(ua) &&
-    /WebKit/i.test(ua) &&
-    !/CriOS|FxiOS|OPiOS/i.test(ua);
+  const ctx = obtenerAudioContext();
+  if (!ctx) return null;
 
-  // macOS Safari (excluir Chrome, Chromium, Edge, Firefox, Opera)
-  const esMacSafari =
-    /Macintosh/i.test(ua) &&
-    /Safari/i.test(ua) &&
-    /WebKit/i.test(ua) &&
-    !/Chrome|Chromium|Edg|Firefox|OPR/i.test(ua);
-
-  return esIOSSafari || esMacSafari;
-}
-
-function esAndroid(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  return /Android/i.test(navigator.userAgent);
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      console.warn(`[AudioService] HTTP ${response.status} para ${url}`);
+      return null;
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+    cacheBuffers.set(url, audioBuffer);
+    return audioBuffer;
+  } catch (err) {
+    console.warn(`[AudioService] Error cargando/decodificando ${url}:`, err);
+    return null;
+  }
 }
 
 // ─── API pública ─────────────────────────────────────────────────────────────
@@ -125,8 +136,7 @@ function esAndroid(): boolean {
  * Registra en el cache las URLs de todos los archivos MP3 del género indicado.
  * NO realiza ninguna petición de red — las URLs son estáticas y conocidas.
  * El progreso se reporta de forma síncrona para que la barra de carga avance
- * correctamente en Safari (iOS/macOS) y Android (donde fetch HEAD puede
- * bloquearse).
+ * correctamente en todos los navegadores.
  *
  * @param genero      'masculina' | 'femenina'
  * @param onProgreso  Callback opcional (cargados, total) para UI de progreso
@@ -138,18 +148,12 @@ export async function precargarGenero(
   const total = TOTAL_NUMEROS * 2; // base + variación por número
 
   // ── Caso 1: precarga ya completó ────────────────────────────────────────
-  // El componente se desmontó y remontó (navegación, React StrictMode, etc.)
-  // El estado React se reinició a 0% pero el módulo ya tiene todo cargado.
-  // Reportamos 100% inmediatamente para sincronizar la UI.
   if (precargaCompleta.has(genero)) {
     onProgreso?.(total, total);
     return;
   }
 
   // ── Caso 2: precarga en curso ────────────────────────────────────────────
-  // Otro llamador ya inició la precarga (p.ej. React StrictMode ejecuta el
-  // efecto dos veces). Registramos el callback para que reciba las
-  // actualizaciones de progreso del loop que ya está corriendo.
   if (precargaIniciada.has(genero)) {
     if (onProgreso) {
       if (!callbacksPendientes.has(genero)) {
@@ -172,16 +176,13 @@ export async function precargarGenero(
 
   console.log(`[AudioService] Registrando URLs de voz ${genero} (${TOTAL_NUMEROS} números × 2 variantes)`);
 
-  // Helper para notificar a TODOS los callbacks registrados (el original + pendientes)
+  // Helper para notificar a TODOS los callbacks registrados
   const notificar = (c: number, t: number) => {
     onProgreso?.(c, t);
     callbacksPendientes.get(genero)?.forEach(cb => cb(c, t));
   };
 
   // Registrar URLs de forma síncrona — sin fetch, sin red.
-  // Esto garantiza que la barra de progreso avance en todos los navegadores,
-  // incluyendo Safari (iOS/macOS) y Android WebView donde fetch HEAD puede
-  // bloquearse.
   for (let n = 1; n <= TOTAL_NUMEROS; n++) {
     const urlBase = urlAudio(genero, n, false);
     const urlVar  = urlAudio(genero, n, true);
@@ -191,83 +192,55 @@ export async function precargarGenero(
     notificar(cargados, total);
 
     // Ceder el hilo cada 10 números para no bloquear el render de React
-    // y permitir que la barra de progreso se actualice visualmente.
     if (n % 10 === 0) {
       await new Promise<void>(resolve => setTimeout(resolve, 0));
     }
   }
 
   precargaCompleta.add(genero);
-  callbacksPendientes.delete(genero); // limpiar callbacks ya notificados
+  callbacksPendientes.delete(genero);
   console.log(`[AudioService] ✅ URLs registradas: voz ${genero}`);
-
-  // En Safari (iOS y macOS) y Android, precargamos los primeros 10 números
-  // con Audio para reducir la latencia del primer sonido (sin bloquear el juego).
-  if (esSafari() || esAndroid()) {
-    _precalentarPrimeros(genero, mapaGenero);
-  }
 }
 
 /**
- * Precalienta los primeros N números creando HTMLAudioElement con preload='auto'.
- * Solo se ejecuta en Safari (iOS/macOS) y Android para reducir latencia del
- * primer audio. No bloquea el flujo principal.
- */
-function _precalentarPrimeros(
-  genero: GeneroAudio,
-  mapaGenero: Map<number, { base: string; variacion: string }>,
-  cantidad = 10
-): void {
-  console.log(`[AudioService] Precalentando primeros ${cantidad} números para ${genero} (Safari/Android)`);
-  for (let n = 1; n <= Math.min(cantidad, TOTAL_NUMEROS); n++) {
-    const entrada = mapaGenero.get(n);
-    if (!entrada) continue;
-    try {
-      const el = new Audio();
-      el.preload = 'auto';
-      el.src = entrada.base;
-      // No llamamos play() — solo cargamos el buffer
-    } catch {
-      // ignorar errores de precalentamiento
-    }
-  }
-}
-
-/**
- * Reproduce el audio del número indicado para el género dado.
+ * Reproduce el audio del número indicado para el género dado usando Web Audio API.
  *
- * ESTRATEGIA PARA Safari (iOS/macOS) y Android:
- * • Se crea un NUEVO HTMLAudioElement en cada reproducción.
- *   Reutilizar el mismo elemento causa que Safari rechace play()
- *   porque el elemento ya no está "fresco" desde la interacción del usuario.
- * • Se espera el evento `canplay` antes de llamar play().
- *   En Safari y Android, llamar play() inmediatamente después de asignar src
- *   puede lanzar NotSupportedError o AbortError porque el navegador no ha
- *   cargado suficientes datos aún. Esperar `canplay` garantiza que el buffer
- *   está listo y play() tendrá éxito.
- * • Un timeout de seguridad (CANPLAY_TIMEOUT_MS) evita esperas infinitas:
- *   si `canplay` no llega en ese tiempo, se intenta play() de todas formas.
- * • preload='auto' permite que Safari/Android buffeé el audio antes de play().
- * • Se retorna una Promise<boolean> que resuelve true si el audio
- *   se reprodujo correctamente, false si falló (para activar TTS fallback).
+ * ESTRATEGIA iOS Safari:
+ * • Se usa AudioContext en lugar de HTMLAudioElement.
+ * • Una vez que el AudioContext se desbloquea con el primer gesto del usuario
+ *   (via desbloquearAudioContext()), puede reproducir audio desde cualquier
+ *   contexto asíncrono, incluyendo setInterval y .then() de Promises.
+ * • HTMLAudioElement.play() en iOS Safari solo funciona desde handlers de
+ *   gesto directo, lo que lo hace incompatible con el modo automático del bingo.
  *
  * @returns Promise<boolean> — true = reproducción iniciada, false = falló
  */
-export function reproducirNumero(
+export async function reproducirNumero(
   numero: number,
   genero: GeneroAudio
 ): Promise<boolean> {
-  if (typeof Audio === 'undefined') return Promise.resolve(false);
+  const ctx = obtenerAudioContext();
+  if (!ctx) return false;
 
   // Detener audio anterior si existe
-  if (audioActivo) {
+  if (sourceActivo) {
     try {
-      audioActivo.pause();
-      audioActivo.src = '';
+      sourceActivo.stop();
+      sourceActivo.disconnect();
     } catch {
       // ignorar errores al detener
     }
-    audioActivo = null;
+    sourceActivo = null;
+  }
+
+  // Reanudar el AudioContext si está suspendido (iOS lo suspende en background)
+  if (ctx.state === 'suspended') {
+    try {
+      await ctx.resume();
+    } catch {
+      console.warn('[AudioService] No se pudo reanudar el AudioContext');
+      return false;
+    }
   }
 
   // Elegir aleatoriamente base o variación (50/50)
@@ -281,152 +254,82 @@ export function reproducirNumero(
     const entrada = mapaGenero.get(numero)!;
     url = usarVariacion ? entrada.variacion : entrada.base;
   } else {
-    // Cache miss: construir URL al vuelo
     url = urlAudio(genero, numero, usarVariacion);
     console.log(`[AudioService] Cache miss para ${genero}/${numero} — usando URL al vuelo`);
   }
 
-  // SIEMPRE crear un nuevo HTMLAudioElement (crítico para Safari y Android)
-  const audioEl = new Audio();
+  // Obtener el AudioBuffer (del cache o descargando)
+  const buffer = await obtenerBuffer(url);
+  if (!buffer) {
+    console.warn(`[AudioService] No se pudo obtener buffer para ${genero}/${numero} (${url})`);
+    return false;
+  }
 
-  // preload='auto': permite que Safari/Android buffeé el audio antes de play().
-  // Con preload='none', play() puede fallar si el buffer no está listo.
-  audioEl.preload = 'auto';
-  audioEl.src = url;
-  audioActivo = audioEl;
+  // Crear y conectar el nodo de reproducción
+  try {
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    source.start(0);
+    sourceActivo = source;
 
-  return new Promise<boolean>((resolve) => {
-    let resuelto = false;
-
-    const resolver = (valor: boolean) => {
-      if (resuelto) return;
-      resuelto = true;
-      cleanup();
-      resolve(valor);
-    };
-
-    const onError = () => {
-      console.warn(`[AudioService] Error reproduciendo ${genero}/${numero} (${url})`);
-      resolver(false);
-    };
-
-    const onEnded = () => {
-      // Audio terminó correctamente — no necesitamos hacer nada más
-    };
-
-    // Función que ejecuta play() y maneja su Promise
-    const ejecutarPlay = () => {
-      const promesaPlay = audioEl.play();
-
-      if (promesaPlay !== undefined) {
-        promesaPlay
-          .then(() => {
-            // Reproducción iniciada correctamente
-            resolver(true);
-          })
-          .catch((err) => {
-            // AutoPlay bloqueado o error de red → fallback TTS
-            console.warn(`[AudioService] play() rechazado para ${genero}/${numero}:`, err);
-            resolver(false);
-          });
-      } else {
-        // Navegadores antiguos que no devuelven Promise (muy raro)
-        resolver(true);
+    // Limpiar la referencia cuando termine
+    source.onended = () => {
+      if (sourceActivo === source) {
+        sourceActivo = null;
       }
     };
 
-    const cleanup = () => {
-      audioEl.removeEventListener('error', onError);
-      audioEl.removeEventListener('ended', onEnded);
-      audioEl.removeEventListener('canplay', onCanPlay);
-      if (canPlayTimer !== null) {
-        clearTimeout(canPlayTimer);
-        canPlayTimer = null;
-      }
-    };
-
-    audioEl.addEventListener('error', onError, { once: true });
-    audioEl.addEventListener('ended', onEnded, { once: true });
-
-    // ── Estrategia canplay para Safari (iOS/macOS) y Android ──────────────
-    // En estos navegadores, play() llamado inmediatamente después de asignar
-    // src puede fallar con NotSupportedError o AbortError porque el buffer
-    // no está listo. Esperamos `canplay` para garantizar que hay datos
-    // suficientes antes de llamar play().
-    //
-    // En navegadores de escritorio (Chrome, Firefox) el evento `canplay`
-    // llega casi instantáneamente, por lo que no hay penalización de latencia.
-    let canPlayTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const onCanPlay = () => {
-      if (canPlayTimer !== null) {
-        clearTimeout(canPlayTimer);
-        canPlayTimer = null;
-      }
-      audioEl.removeEventListener('canplay', onCanPlay);
-      ejecutarPlay();
-    };
-
-    audioEl.addEventListener('canplay', onCanPlay, { once: true });
-
-    // Timeout de seguridad: si `canplay` no llega en CANPLAY_TIMEOUT_MS ms
-    // (red lenta, archivo inexistente, etc.), intentamos play() de todas formas.
-    canPlayTimer = setTimeout(() => {
-      canPlayTimer = null;
-      audioEl.removeEventListener('canplay', onCanPlay);
-      console.warn(`[AudioService] canplay timeout para ${genero}/${numero} — intentando play() de todas formas`);
-      ejecutarPlay();
-    }, CANPLAY_TIMEOUT_MS);
-
-    // Llamar load() explícitamente para que Safari inicie la carga del buffer.
-    // Sin load(), algunos navegadores (especialmente Safari macOS) no disparan
-    // `canplay` hasta que se llama play(), creando un deadlock.
-    audioEl.load();
-  });
+    return true;
+  } catch (err) {
+    console.warn(`[AudioService] Error reproduciendo ${genero}/${numero}:`, err);
+    return false;
+  }
 }
 
 /**
- * Desbloquea el contexto de HTMLAudioElement en Safari/iOS y Android.
+ * Desbloquea el AudioContext en iOS Safari y Android.
  *
- * En Safari (iOS y macOS) y Android, el autoplay de HTMLAudioElement está
- * bloqueado hasta que el usuario interactúa con la página. Esta función
- * debe llamarse directamente desde un handler de evento de usuario (tap/click)
- * para "desbloquear" el contexto de audio del navegador.
+ * En iOS Safari y Android, el AudioContext queda en estado 'suspended'
+ * hasta que se llama resume() desde un handler de evento de usuario.
+ * Esta función DEBE llamarse directamente desde un tap/click del usuario.
  *
- * Estrategia: crear un HTMLAudioElement silencioso, asignarle un src vacío
- * y llamar play() inmediatamente. Esto registra el gesto del usuario en el
- * contexto de audio del navegador, permitiendo que llamadas posteriores a
- * play() (incluso desde setInterval) funcionen correctamente.
+ * También crea el AudioContext si aún no existe, lo que es necesario
+ * en iOS Safari donde el contexto debe crearse desde un gesto del usuario.
+ */
+export function desbloquearAudioContext(): void {
+  const ctx = obtenerAudioContext();
+  if (!ctx) return;
+
+  if (ctx.state === 'suspended') {
+    ctx.resume().then(() => {
+      console.log('[AudioService] ✅ AudioContext desbloqueado');
+    }).catch((err) => {
+      console.warn('[AudioService] No se pudo desbloquear AudioContext:', err);
+    });
+  }
+}
+
+/**
+ * Alias para compatibilidad con código existente en Juego.tsx.
+ * Ahora delega a desbloquearAudioContext().
  */
 export function desbloquearAudioElement(): void {
-  if (typeof Audio === 'undefined') return;
-  try {
-    // Crear un elemento de audio con un src de datos vacío (silencioso)
-    // El src de datos garantiza que no hay petición de red y que el
-    // elemento es válido para que Safari acepte el play().
-    const el = new Audio();
-    el.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
-    el.volume = 0;
-    el.play().catch(() => {
-      // Ignorar errores — el objetivo es solo registrar el gesto
-    });
-  } catch {
-    // Ignorar cualquier error
-  }
+  desbloquearAudioContext();
 }
 
 /**
  * Detiene toda reproducción activa.
  */
 export function detenerTodoAudio(): void {
-  if (audioActivo) {
+  if (sourceActivo) {
     try {
-      audioActivo.pause();
-      audioActivo.src = '';
+      sourceActivo.stop();
+      sourceActivo.disconnect();
     } catch {
       // ignorar
     }
-    audioActivo = null;
+    sourceActivo = null;
   }
 }
 
@@ -443,6 +346,16 @@ export function detenerAudio(_genero: GeneroAudio): void {
  */
 export function limpiarCacheGenero(genero: GeneroAudio): void {
   detenerTodoAudio();
+
+  // Limpiar también los AudioBuffers cacheados de este género
+  const mapaGenero = cacheURLs.get(genero);
+  if (mapaGenero) {
+    for (const entrada of mapaGenero.values()) {
+      cacheBuffers.delete(entrada.base);
+      cacheBuffers.delete(entrada.variacion);
+    }
+  }
+
   cacheURLs.delete(genero);
   precargaIniciada.delete(genero);
   precargaCompleta.delete(genero);

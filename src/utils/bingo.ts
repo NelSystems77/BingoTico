@@ -1072,21 +1072,12 @@ export function hablarNumero(numero: number, voz: 'masculina' | 'femenina'): voi
 
 /**
  * Reproduce el número usando archivos MP3 pregrabados (lazy loading).
- * Si el audio MP3 no está disponible o falla, cae automáticamente
- * al motor de síntesis de voz (SpeechSynthesis / TTS).
+ * NO usa SpeechSynthesis como fallback — los MP3 son la única fuente de audio.
  *
- * Flujo:
- *  1. Intenta reproducir el MP3 del género seleccionado via audioService.
- *  2. audioService.reproducirNumero() devuelve Promise<boolean>:
- *     - true  → reproducción iniciada correctamente, no hacer nada más.
- *     - false → Audio no soportado, autoplay bloqueado o error de red
- *               → activar TTS como fallback.
- *
- * IMPORTANTE para Safari/iOS y Android:
- *  • NO se llama detenerTodoAudio() antes de reproducirNumero() porque
- *    en Safari eso puede romper el contexto de audio del gesto del usuario.
- *  • audioService ya detiene el audio anterior internamente al crear
- *    el nuevo HTMLAudioElement.
+ * En iOS Safari el AudioContext (desbloqueado con el primer gesto del usuario
+ * via desbloquearAudioContext()) mantiene el permiso de reproducción activo
+ * incluso desde setInterval o código asíncrono, a diferencia de HTMLAudioElement
+ * que requiere que play() se llame directamente desde un handler de gesto.
  *
  * @param numero  Número de bola (1–90)
  * @param voz     Género de la voz: 'masculina' | 'femenina'
@@ -1095,12 +1086,11 @@ export function hablarNumeroConAudio(
   numero: number,
   voz: GeneroAudio
 ): void {
-  // reproducirNumero() ahora devuelve Promise<boolean>
-  // true = MP3 reproduciéndose, false = falló → usar TTS
   reproducirNumero(numero, voz).then((exito) => {
     if (!exito) {
-      console.warn(`[BingoTico] MP3 no disponible para ${voz}/${numero} — usando TTS como fallback`);
-      hablarNumero(numero, voz);
+      // MP3 falló (archivo no encontrado, error de red, etc.)
+      // No se usa TTS — se registra el error para diagnóstico.
+      console.warn(`[BingoTico] No se pudo reproducir MP3 ${voz}/${numero}`);
     }
   });
 }

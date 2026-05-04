@@ -65,6 +65,13 @@ const precargaIniciada = new Set<GeneroAudio>();
 /** Indica si la precarga de un género ya completó */
 const precargaCompleta = new Set<GeneroAudio>();
 
+/**
+ * Callbacks de progreso pendientes para cuando la precarga está en curso.
+ * Permite que múltiples llamadores (p.ej. React StrictMode monta dos veces)
+ * reciban actualizaciones de progreso aunque la precarga ya haya sido iniciada.
+ */
+const callbacksPendientes = new Map<GeneroAudio, Array<(cargados: number, total: number) => void>>();
+
 /** Elemento de audio actualmente en reproducción (para poder detenerlo) */
 let audioActivo: HTMLAudioElement | null = null;
 
@@ -128,7 +135,32 @@ export async function precargarGenero(
   genero: GeneroAudio,
   onProgreso?: (cargados: number, total: number) => void
 ): Promise<void> {
-  if (precargaIniciada.has(genero)) return; // ya en curso o completa
+  const total = TOTAL_NUMEROS * 2; // base + variación por número
+
+  // ── Caso 1: precarga ya completó ────────────────────────────────────────
+  // El componente se desmontó y remontó (navegación, React StrictMode, etc.)
+  // El estado React se reinició a 0% pero el módulo ya tiene todo cargado.
+  // Reportamos 100% inmediatamente para sincronizar la UI.
+  if (precargaCompleta.has(genero)) {
+    onProgreso?.(total, total);
+    return;
+  }
+
+  // ── Caso 2: precarga en curso ────────────────────────────────────────────
+  // Otro llamador ya inició la precarga (p.ej. React StrictMode ejecuta el
+  // efecto dos veces). Registramos el callback para que reciba las
+  // actualizaciones de progreso del loop que ya está corriendo.
+  if (precargaIniciada.has(genero)) {
+    if (onProgreso) {
+      if (!callbacksPendientes.has(genero)) {
+        callbacksPendientes.set(genero, []);
+      }
+      callbacksPendientes.get(genero)!.push(onProgreso);
+    }
+    return;
+  }
+
+  // ── Caso 3: primera vez — iniciar precarga ───────────────────────────────
   precargaIniciada.add(genero);
 
   if (!cacheURLs.has(genero)) {
@@ -136,12 +168,17 @@ export async function precargarGenero(
   }
   const mapaGenero = cacheURLs.get(genero)!;
 
-  const total = TOTAL_NUMEROS * 2; // base + variación por número
   let cargados = 0;
 
   console.log(`[AudioService] Registrando URLs de voz ${genero} (${TOTAL_NUMEROS} números × 2 variantes)`);
 
-  // Registrar URLs de forma síncrona — sin fetch, sin red
+  // Helper para notificar a TODOS los callbacks registrados (el original + pendientes)
+  const notificar = (c: number, t: number) => {
+    onProgreso?.(c, t);
+    callbacksPendientes.get(genero)?.forEach(cb => cb(c, t));
+  };
+
+  // Registrar URLs de forma síncrona — sin fetch, sin red.
   // Esto garantiza que la barra de progreso avance en todos los navegadores,
   // incluyendo Safari (iOS/macOS) y Android WebView donde fetch HEAD puede
   // bloquearse.
@@ -151,7 +188,7 @@ export async function precargarGenero(
 
     mapaGenero.set(n, { base: urlBase, variacion: urlVar });
     cargados += 2;
-    onProgreso?.(cargados, total);
+    notificar(cargados, total);
 
     // Ceder el hilo cada 10 números para no bloquear el render de React
     // y permitir que la barra de progreso se actualice visualmente.
@@ -161,6 +198,7 @@ export async function precargarGenero(
   }
 
   precargaCompleta.add(genero);
+  callbacksPendientes.delete(genero); // limpiar callbacks ya notificados
   console.log(`[AudioService] ✅ URLs registradas: voz ${genero}`);
 
   // En Safari (iOS y macOS) y Android, precargamos los primeros 10 números
@@ -378,6 +416,7 @@ export function limpiarCacheGenero(genero: GeneroAudio): void {
   cacheURLs.delete(genero);
   precargaIniciada.delete(genero);
   precargaCompleta.delete(genero);
+  callbacksPendientes.delete(genero);
   console.log(`[AudioService] Cache liberado para voz ${genero}`);
 }
 

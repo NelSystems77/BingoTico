@@ -9,7 +9,7 @@ import {
   desbloquearSpeechSynthesis,
   detenerKeepAliveIOS,
 } from '../utils/bingo';
-import { precargarGenero, desbloquearAudioElement } from '../services/audioService';
+import { precargarGenero, desbloquearAudioElement, limpiarCacheGenero } from '../services/audioService';
 import { detenerTodoAudio } from '../utils/bingo';
 import { firebaseService } from '../services/firebase';
 import type { Partida } from '../types';
@@ -49,13 +49,31 @@ export default function Juego() {
 
   // ── Precarga lazy de audio al montar el componente ───────────────
   // Se inicia en segundo plano según el género configurado.
+  // Cuando cambia la voz (config.voz), se limpia el cache del género
+  // anterior y se reinicia la precarga para el nuevo género.
   // El juego puede comenzar antes de que termine; si un número se
   // solicita antes de que su MP3 esté listo, audioService lo carga
   // al vuelo y usa TTS como fallback si falla.
+  const vozAnteriorRef = useRef<string | null>(null);
+
   useEffect(() => {
-    if (!config.sonido) return; // sin sonido → no precargar
+    if (!config.sonido) {
+      setProgresoCarga(100); // sin sonido → marcar como listo
+      return;
+    }
 
     const genero = config.voz; // 'masculina' | 'femenina'
+
+    // Si la voz cambió respecto a la anterior, limpiar cache del género
+    // anterior para forzar recarga con las URLs correctas
+    if (vozAnteriorRef.current && vozAnteriorRef.current !== genero) {
+      const generoAnterior = vozAnteriorRef.current as 'masculina' | 'femenina';
+      limpiarCacheGenero(generoAnterior);
+      setProgresoCarga(0); // reiniciar barra de progreso
+      console.log(`[Juego] Voz cambiada de ${generoAnterior} a ${genero} — recargando audio`);
+    }
+    vozAnteriorRef.current = genero;
+
     precargarGenero(genero, (cargados, total) => {
       setProgresoCarga(Math.round((cargados / total) * 100));
     });

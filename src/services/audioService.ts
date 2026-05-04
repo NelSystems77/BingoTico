@@ -5,7 +5,7 @@
  * MP3 de los números del bingo.
  *
  * Estructura de carpetas esperada en /public:
- *   /audio/numbers/          → voz masculina  (1.mp3, 1_var.mp3 … 90.mp3, 90_var.mp3)
+ *   /audio/numbers-male/     → voz masculina  (1.mp3, 1_var.mp3 … 90.mp3, 90_var.mp3)
  *   /audio/numbers-female/   → voz femenina   (1.mp3, 1_var.mp3 … 90.mp3, 90_var.mp3)
  *
  * Estrategia de lazy loading:
@@ -39,7 +39,7 @@ export type GeneroAudio = 'masculina' | 'femenina';
 
 /** Rutas base de los dos conjuntos de audio */
 const BASE_PATHS: Record<GeneroAudio, string> = {
-  masculina: '/audio/numbers',
+  masculina: '/audio/numbers-male',
   femenina:  '/audio/numbers-female',
 };
 

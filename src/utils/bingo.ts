@@ -751,6 +751,10 @@ const TOKENS_MASCULINOS = [
   'raul', 'ricardo', 'rodrigo', 'victor', 'angel', 'cesar', 'emilio',
   'gerardo', 'gustavo', 'hugo', 'jaime', 'leo', 'marcos', 'martin',
   'nicolas', 'omar', 'rene', 'ruben', 'salvador', 'tomas',
+  // Nombres masculinos adicionales detectados en consola
+  'luciano', 'marcelo', 'lorenzo', 'federico', 'mateo', 'sebastian',
+  'arnau', 'dario', 'elias', 'nil', 'saul', 'teo', 'yago', 'pelayo',
+  'liberto', 'cecilio', 'alonso', 'alex', 'andres',
   // Indicadores genéricos
   'male', 'hombre', 'masculin', 'masc',
 ];
@@ -766,6 +770,11 @@ const TOKENS_FEMENINOS = [
   'natalia', 'paola', 'sandra', 'silvia', 'susana', 'teresa', 'veronica',
   'marisol', 'esperanza', 'dolores', 'amparo', 'rocio', 'yolanda',
   'lorena', 'miriam', 'nuria', 'olga', 'raquel', 'rebeca', 'sonia',
+  // Nombres femeninos adicionales detectados en consola
+  'irene', 'catalina', 'salome', 'belkys', 'ramona', 'karla', 'karina',
+  'tania', 'marta', 'dalia', 'candela', 'carlota', 'larissa', 'marina',
+  'renata', 'paloma', 'arabella', 'isidora', 'tristan', 'abril', 'estrella',
+  'laia', 'lia', 'vera', 'triana', 'margarita', 'yolanda',
   // Indicadores genéricos
   'female', 'mujer', 'femenin', 'fem',
 ];

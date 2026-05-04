@@ -9,7 +9,7 @@ import {
   desbloquearSpeechSynthesis,
   detenerKeepAliveIOS,
 } from '../utils/bingo';
-import { precargarGenero } from '../services/audioService';
+import { precargarGenero, desbloquearAudioElement } from '../services/audioService';
 import { detenerTodoAudio } from '../utils/bingo';
 import { firebaseService } from '../services/firebase';
 import type { Partida } from '../types';
@@ -34,11 +34,17 @@ export default function Juego() {
   const partidaRef = useRef<Partida | null>(null);
   useEffect(() => { partidaRef.current = partida; }, [partida]);
 
-  // ── iOS Safari: desbloquear speechSynthesis con el primer gesto ──
+  // Ref para extraerBola — evita stale closure en el setInterval de auto-extracción.
+  // Se actualiza en cada render para que el intervalo siempre llame a la versión
+  // más reciente de extraerBola (con el config.voz actual).
+  const extraerBolaRef = useRef<() => void>(() => {});
+
+  // ── iOS Safari: desbloquear speechSynthesis Y HTMLAudioElement con el primer gesto ──
   const desbloquearAudio = () => {
     if (audioDesbloqueadoRef.current) return;
     audioDesbloqueadoRef.current = true;
     desbloquearSpeechSynthesis();
+    desbloquearAudioElement(); // desbloquear HTMLAudioElement para Safari/Android
   };
 
   // ── Precarga lazy de audio al montar el componente ───────────────
@@ -89,19 +95,6 @@ export default function Juego() {
     };
   }, []);
 
-  // ── Auto-extracción ──────────────────────────────────────────────
-  useEffect(() => {
-    if (jugando && !pausado && config.extraccion === 'automatica' && sorteo) {
-      intervalRef.current = setInterval(() => {
-        extraerBola();
-      }, config.tiempoExtraccion * 1000);
-
-      return () => {
-        if (intervalRef.current) clearInterval(intervalRef.current);
-      };
-    }
-  }, [jugando, pausado, config.extraccion, config.tiempoExtraccion]);
-
   // ── Lógica de extracción ─────────────────────────────────────────
   const extraerBola = () => {
     if (!sorteo || !sorteo.hayBolasPendientes()) {
@@ -127,6 +120,25 @@ export default function Juego() {
       });
     }
   };
+
+  // Mantener el ref siempre actualizado con la versión más reciente de extraerBola.
+  // Esto garantiza que el setInterval del modo automático siempre use el config.voz
+  // actual (sin stale closure), incluso si el usuario cambia la voz durante el juego.
+  extraerBolaRef.current = extraerBola;
+
+  // ── Auto-extracción ──────────────────────────────────────────────
+  useEffect(() => {
+    if (jugando && !pausado && config.extraccion === 'automatica' && sorteo) {
+      intervalRef.current = setInterval(() => {
+        // Llamar siempre a través del ref para evitar stale closure
+        extraerBolaRef.current();
+      }, config.tiempoExtraccion * 1000);
+
+      return () => {
+        if (intervalRef.current) clearInterval(intervalRef.current);
+      };
+    }
+  }, [jugando, pausado, config.extraccion, config.tiempoExtraccion]);
 
   // ── Handlers de UI ───────────────────────────────────────────────
   const handleIniciar = () => {

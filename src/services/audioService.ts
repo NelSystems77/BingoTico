@@ -386,6 +386,36 @@ export function reproducirNumero(
 }
 
 /**
+ * Desbloquea el contexto de HTMLAudioElement en Safari/iOS y Android.
+ *
+ * En Safari (iOS y macOS) y Android, el autoplay de HTMLAudioElement está
+ * bloqueado hasta que el usuario interactúa con la página. Esta función
+ * debe llamarse directamente desde un handler de evento de usuario (tap/click)
+ * para "desbloquear" el contexto de audio del navegador.
+ *
+ * Estrategia: crear un HTMLAudioElement silencioso, asignarle un src vacío
+ * y llamar play() inmediatamente. Esto registra el gesto del usuario en el
+ * contexto de audio del navegador, permitiendo que llamadas posteriores a
+ * play() (incluso desde setInterval) funcionen correctamente.
+ */
+export function desbloquearAudioElement(): void {
+  if (typeof Audio === 'undefined') return;
+  try {
+    // Crear un elemento de audio con un src de datos vacío (silencioso)
+    // El src de datos garantiza que no hay petición de red y que el
+    // elemento es válido para que Safari acepte el play().
+    const el = new Audio();
+    el.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+    el.volume = 0;
+    el.play().catch(() => {
+      // Ignorar errores — el objetivo es solo registrar el gesto
+    });
+  } catch {
+    // Ignorar cualquier error
+  }
+}
+
+/**
  * Detiene toda reproducción activa.
  */
 export function detenerTodoAudio(): void {

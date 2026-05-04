@@ -1,5 +1,7 @@
 import QRCode from 'qrcode';
 import type { LlamadaBola } from '../types';
+import { reproducirNumero, detenerTodoAudio } from '../services/audioService';
+import type { GeneroAudio } from '../services/audioService';
 
 // Generar código único de cartón
 export function generarCodigoCarton(): string {
@@ -1050,4 +1052,47 @@ export function hablarNumero(numero: number, voz: 'masculina' | 'femenina'): voi
   // (iOS Safari rechaza speak() dentro de setTimeout si no hay gesto activo)
   speechSynthesis.cancel();
   dispararUtterance(texto, voz);
+}
+
+// ============================================================
+// REPRODUCCIÓN CON AUDIO MP3 (lazy loading) + FALLBACK TTS
+// ============================================================
+
+/**
+ * Reproduce el número usando archivos MP3 pregrabados (lazy loading).
+ * Si el audio MP3 no está disponible o falla, cae automáticamente
+ * al motor de síntesis de voz (SpeechSynthesis / TTS).
+ *
+ * Flujo:
+ *  1. Intenta reproducir el MP3 del género seleccionado via audioService.
+ *  2. Si `reproducirNumero()` devuelve null (Audio no soportado) → TTS.
+ *  3. Si play() falla (autoplay bloqueado, archivo no encontrado) → TTS.
+ *
+ * @param numero  Número de bola (1–90)
+ * @param voz     Género de la voz: 'masculina' | 'femenina'
+ */
+export function hablarNumeroConAudio(
+  numero: number,
+  voz: GeneroAudio
+): void {
+  // Detener cualquier audio MP3 que esté sonando
+  detenerTodoAudio();
+
+  // Intentar reproducir MP3
+  const audioEl = reproducirNumero(numero, voz);
+
+  if (audioEl === null) {
+    // Audio API no disponible → usar TTS directamente
+    hablarNumero(numero, voz);
+    return;
+  }
+
+  // Escuchar si play() falla para activar el fallback TTS
+  const onError = () => {
+    audioEl.removeEventListener('error', onError);
+    console.warn(`[BingoTico] MP3 falló para ${voz}/${numero} — usando TTS como fallback`);
+    hablarNumero(numero, voz);
+  };
+
+  audioEl.addEventListener('error', onError, { once: true });
 }

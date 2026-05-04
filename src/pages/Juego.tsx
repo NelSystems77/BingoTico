@@ -3,7 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import { useGameStore } from '../stores/gameStore';
 import { useConfigStore } from '../stores/configStore';
 import { SorteoEngine } from '../core/game-engine/core/sorteo.engine';
-import { obtenerLlamadaBola, hablarNumero, desbloquearSpeechSynthesis, detenerKeepAliveIOS } from '../utils/bingo';
+import {
+  obtenerLlamadaBola,
+  hablarNumeroConAudio,
+  desbloquearSpeechSynthesis,
+  detenerKeepAliveIOS,
+} from '../utils/bingo';
+import { precargarGenero, detenerTodoAudio } from '../services/audioService';
 import { firebaseService } from '../services/firebase';
 import type { Partida } from '../types';
 
@@ -18,18 +24,37 @@ export default function Juego() {
   const [jugando, setJugando] = useState(false);
   const [pausado, setPausado] = useState(false);
   const [partida, setPartida] = useState<Partida | null>(null);
+  /** Progreso de precarga de audio (0–100). 100 = listo. */
+  const [progresoCarga, setProgresoCarga] = useState(0);
+
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const audioDesbloqueadoRef = useRef(false);
+  // Ref para acceder al partida actual dentro del intervalo sin stale closure
+  const partidaRef = useRef<Partida | null>(null);
+  useEffect(() => { partidaRef.current = partida; }, [partida]);
 
   // ── iOS Safari: desbloquear speechSynthesis con el primer gesto ──
-  // Usa la función robusta de bingo.ts que incluye keep-alive para iOS.
   const desbloquearAudio = () => {
     if (audioDesbloqueadoRef.current) return;
     audioDesbloqueadoRef.current = true;
     desbloquearSpeechSynthesis();
   };
 
-  // Inicializar sorteo
+  // ── Precarga lazy de audio al montar el componente ───────────────
+  // Se inicia en segundo plano según el género configurado.
+  // El juego puede comenzar antes de que termine; si un número se
+  // solicita antes de que su MP3 esté listo, audioService lo carga
+  // al vuelo y usa TTS como fallback si falla.
+  useEffect(() => {
+    if (!config.sonido) return; // sin sonido → no precargar
+
+    const genero = config.voz; // 'masculina' | 'femenina'
+    precargarGenero(genero, (cargados, total) => {
+      setProgresoCarga(Math.round((cargados / total) * 100));
+    });
+  }, [config.voz, config.sonido]);
+
+  // ── Inicializar sorteo ───────────────────────────────────────────
   useEffect(() => {
     if (!evento) {
       navigate('/');
@@ -53,20 +78,17 @@ export default function Juego() {
         setPartida({ ...nuevaPartida, id });
       });
     } else {
-      // Partida local: ID generado sin Firebase
       setPartida({ ...nuevaPartida, id: `local-partida-${Date.now()}` });
     }
 
     return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-      // Detener keep-alive de iOS al salir de la pantalla
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      detenerTodoAudio();
       detenerKeepAliveIOS();
     };
   }, []);
 
-  // Auto-extracción
+  // ── Auto-extracción ──────────────────────────────────────────────
   useEffect(() => {
     if (jugando && !pausado && config.extraccion === 'automatica' && sorteo) {
       intervalRef.current = setInterval(() => {
@@ -74,58 +96,49 @@ export default function Juego() {
       }, config.tiempoExtraccion * 1000);
 
       return () => {
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current);
-        }
+        if (intervalRef.current) clearInterval(intervalRef.current);
       };
     }
   }, [jugando, pausado, config.extraccion, config.tiempoExtraccion]);
 
+  // ── Lógica de extracción ─────────────────────────────────────────
   const extraerBola = () => {
-    // SorteoEngine usa hayBolasPendientes() — no haFinalizado()
     if (!sorteo || !sorteo.hayBolasPendientes()) {
       setJugando(false);
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
+      if (intervalRef.current) clearInterval(intervalRef.current);
       return;
     }
 
-    // SorteoEngine usa sortearBola() — no extraerBola()
     const nuevaBola = sorteo.sortearBola();
-
     setBolaActual(nuevaBola);
-    // getBolasSorteadas() devuelve readonly number[]; copiamos con spread
     setBolasExtraidas([...sorteo.getBolasSorteadas()]);
 
-    // Hablar número
+    // Reproducir audio MP3 (lazy loading) con fallback a TTS
     if (config.sonido) {
-      hablarNumero(nuevaBola, config.voz);
+      hablarNumeroConAudio(nuevaBola, config.voz);
     }
 
     // Actualizar partida en Firebase (solo si no es local)
-    if (partida && !partida.id.startsWith('local-')) {
-      firebaseService.updatePartida(partida.id, {
+    const p = partidaRef.current;
+    if (p && !p.id.startsWith('local-')) {
+      firebaseService.updatePartida(p.id, {
         bolasExtraidas: [...sorteo.getBolasSorteadas()],
       });
     }
   };
 
+  // ── Handlers de UI ───────────────────────────────────────────────
   const handleIniciar = () => {
-    // Desbloquear audio en iOS/Android con este gesto del usuario
     desbloquearAudio();
     setJugando(true);
     setPausado(false);
-    
-    if (config.extraccion === 'manual') {
-      // En modo manual, no hace nada hasta que presionen el botón
-      return;
-    }
+    // En modo manual el primer sorteo lo dispara el botón EXTRAER BOLA
   };
 
   const handlePausar = () => {
     desbloquearAudio();
-    setPausado(!pausado);
+    if (!pausado) detenerTodoAudio(); // detener MP3 al pausar
+    setPausado(prev => !prev);
   };
 
   const handleExtraerManual = () => {
@@ -136,19 +149,17 @@ export default function Juego() {
   const handleRepetirBola = () => {
     desbloquearAudio();
     if (bolaActual && config.sonido) {
-      hablarNumero(bolaActual, config.voz);
+      hablarNumeroConAudio(bolaActual, config.voz);
     }
   };
 
   const handleFinalizar = async () => {
     setJugando(false);
     setPausado(false);
+    detenerTodoAudio();
 
-    // Solo actualizar Firebase si la partida no es local
     if (partida && !partida.id.startsWith('local-')) {
-      await firebaseService.updatePartida(partida.id, {
-        estado: 'finalizada',
-      });
+      await firebaseService.updatePartida(partida.id, { estado: 'finalizada' });
     }
 
     if (confirm('¿Deseas volver al inicio?')) {
@@ -156,6 +167,7 @@ export default function Juego() {
     }
   };
 
+  // ── Guard de carga ───────────────────────────────────────────────
   if (!evento || !sorteo) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -165,16 +177,17 @@ export default function Juego() {
   }
 
   const llamada = bolaActual ? obtenerLlamadaBola(bolaActual) : null;
-  const progreso = (bolasExtraidas.length / evento.numBolas) * 100;
+  const progresoJuego = (bolasExtraidas.length / evento.numBolas) * 100;
+  const audioPreparado = progresoCarga >= 100;
 
   return (
     <div className="min-h-screen w-full relative overflow-hidden">
       {/* Fondo celeste */}
       <div className="fixed inset-0 w-full h-full bg-sky-gradient" style={{ zIndex: 0 }} />
-      
+
       {/* Contenido */}
       <div className="relative min-h-screen flex flex-col p-4" style={{ zIndex: 3 }}>
-        
+
         {/* Header */}
         <div className="w-full max-w-6xl mx-auto mb-4 flex justify-between items-center">
           <button
@@ -191,18 +204,29 @@ export default function Juego() {
           >
             ← Menú
           </button>
-          
+
           <div className="text-center">
             <h1 className="text-xl font-bold text-white" style={{
               textShadow: '0 2px 8px rgba(0,0,0,0.4)',
               fontFamily: 'Bebas Neue, sans-serif',
-              letterSpacing: '1.5px'
+              letterSpacing: '1.5px',
             }}>
               {evento.nombre}
             </h1>
             <p className="text-xs text-white opacity-90">
               {bolasExtraidas.length} / {evento.numBolas} bolas extraídas
             </p>
+            {/* Indicador de precarga de audio */}
+            {config.sonido && !audioPreparado && (
+              <p className="text-xs text-yellow-200 opacity-80 mt-0.5">
+                🎵 Cargando audio {config.voz}… {progresoCarga}%
+              </p>
+            )}
+            {config.sonido && audioPreparado && (
+              <p className="text-xs text-green-200 opacity-80 mt-0.5">
+                🎵 Audio {config.voz} listo
+              </p>
+            )}
           </div>
 
           <button
@@ -223,11 +247,11 @@ export default function Juego() {
 
         {/* Contenedor principal */}
         <div className="w-full max-w-6xl mx-auto grid lg:grid-cols-2 gap-4 flex-1">
-          
+
           {/* Panel Izquierdo: Cantado */}
-          <div 
+          <div
             className="rounded-xl overflow-hidden flex flex-col"
-            style={{ 
+            style={{
               background: 'rgba(255, 255, 255, 0.12)',
               backdropFilter: 'blur(18px) saturate(180%)',
               boxShadow: '0 10px 35px rgba(0,0,0,0.25)',
@@ -243,7 +267,7 @@ export default function Juego() {
               <h2 className="text-lg text-white font-bold" style={{
                 textShadow: '0 2px 5px rgba(0,0,0,0.6)',
                 fontFamily: 'Bebas Neue, sans-serif',
-                letterSpacing: '1.2px'
+                letterSpacing: '1.2px',
               }}>
                 🎙️ CANTADO
               </h2>
@@ -253,7 +277,7 @@ export default function Juego() {
             <div className="flex-1 flex flex-col items-center justify-center p-8">
               {bolaActual ? (
                 <>
-                  <div 
+                  <div
                     className="rounded-full flex items-center justify-center mb-6 animate-bounce"
                     style={{
                       width: '180px',
@@ -275,11 +299,11 @@ export default function Juego() {
                     <p className="text-3xl font-bold text-white mb-2" style={{
                       textShadow: '0 2px 8px rgba(0,0,0,0.6)',
                       fontFamily: 'Bebas Neue, sans-serif',
-                      letterSpacing: '1px'
+                      letterSpacing: '1px',
                     }}>
                       {llamada?.call || `Número ${bolaActual}`}
                     </p>
-                    
+
                     {config.repetirBola && (
                       <button
                         onClick={handleRepetirBola}
@@ -299,7 +323,7 @@ export default function Juego() {
                 </>
               ) : (
                 <div className="text-center">
-                  <div 
+                  <div
                     className="rounded-full flex items-center justify-center mb-6 mx-auto"
                     style={{
                       width: '180px',
@@ -364,7 +388,7 @@ export default function Juego() {
                       onClick={handlePausar}
                       className="w-full py-3 rounded-md font-bold text-lg transition-all hover:scale-105 active:scale-95"
                       style={{
-                        background: pausado 
+                        background: pausado
                           ? 'rgba(0,155,58,0.92)'
                           : 'rgba(255,193,7,0.92)',
                         backdropFilter: 'blur(10px)',
@@ -382,26 +406,41 @@ export default function Juego() {
                 </>
               )}
 
-              {/* Barra de progreso */}
+              {/* Barra de progreso del juego */}
               <div className="w-full h-3 rounded-full overflow-hidden" style={{
                 background: 'rgba(255,255,255,0.2)',
                 border: '1px solid rgba(255,255,255,0.3)',
               }}>
-                <div 
+                <div
                   className="h-full transition-all duration-500"
                   style={{
-                    width: `${progreso}%`,
+                    width: `${progresoJuego}%`,
                     background: 'linear-gradient(90deg, rgba(0,155,58,0.9) 0%, rgba(0,200,80,0.9) 100%)',
                   }}
                 />
               </div>
+
+              {/* Mini barra de precarga de audio (visible mientras carga) */}
+              {config.sonido && !audioPreparado && (
+                <div className="w-full h-1.5 rounded-full overflow-hidden" style={{
+                  background: 'rgba(255,255,255,0.15)',
+                }}>
+                  <div
+                    className="h-full transition-all duration-300"
+                    style={{
+                      width: `${progresoCarga}%`,
+                      background: 'linear-gradient(90deg, rgba(255,193,7,0.8) 0%, rgba(255,152,0,0.8) 100%)',
+                    }}
+                  />
+                </div>
+              )}
             </div>
           </div>
 
           {/* Panel Derecho: Tablero */}
-          <div 
+          <div
             className="rounded-xl overflow-hidden flex flex-col"
-            style={{ 
+            style={{
               background: 'rgba(255, 255, 255, 0.12)',
               backdropFilter: 'blur(18px) saturate(180%)',
               boxShadow: '0 10px 35px rgba(0,0,0,0.25)',
@@ -417,7 +456,7 @@ export default function Juego() {
               <h2 className="text-lg text-white font-bold" style={{
                 textShadow: '0 2px 5px rgba(0,0,0,0.6)',
                 fontFamily: 'Bebas Neue, sans-serif',
-                letterSpacing: '1.2px'
+                letterSpacing: '1.2px',
               }}>
                 📊 TABLERO
               </h2>
@@ -441,7 +480,7 @@ export default function Juego() {
                           ? 'rgba(0,155,58,0.85)'
                           : 'rgba(255,255,255,0.25)',
                         color: actual || extraido ? 'white' : '#2D2D2D',
-                        border: actual 
+                        border: actual
                           ? '2px solid rgba(255,255,255,0.9)'
                           : extraido
                           ? '1px solid rgba(255,255,255,0.4)'
@@ -452,7 +491,7 @@ export default function Juego() {
                           ? '0 2px 8px rgba(0,155,58,0.3)'
                           : '0 1px 3px rgba(0,0,0,0.1)',
                         transform: actual ? 'scale(1.15)' : 'scale(1)',
-                        textShadow: actual || extraido 
+                        textShadow: actual || extraido
                           ? '0 2px 4px rgba(0,0,0,0.4)'
                           : 'none',
                       }}

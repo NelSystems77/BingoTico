@@ -717,25 +717,89 @@ export function verificarBingo(numeros: number[][], numerosExtraidos: number[]):
 // SINTETIZAR VOZ — Compatible con iOS Safari, Android y Desktop
 // ============================================================
 
+// Nombres de voces conocidas como masculinas en Android/iOS/Desktop (español)
+const VOCES_MASCULINAS = [
+  // Android (Google TTS)
+  'google español',
+  'google español de estados unidos',
+  // iOS / macOS
+  'jorge', 'diego', 'carlos', 'juan', 'miguel', 'antonio', 'alejandro',
+  'enrique', 'felipe', 'francisco', 'gabriel', 'javier', 'jose', 'luis',
+  'manuel', 'pablo', 'pedro', 'rafael', 'roberto', 'sergio',
+  // Windows
+  'pablo', 'jorge',
+  // Genérico
+  'male', 'hombre', 'masculin',
+];
+
+// Nombres de voces conocidas como femeninas en Android/iOS/Desktop (español)
+const VOCES_FEMENINAS = [
+  // Android (Google TTS)
+  'google español femenino',
+  // iOS / macOS
+  'paulina', 'monica', 'mónica', 'luciana', 'valentina', 'sofia', 'sofía',
+  'isabella', 'camila', 'laura', 'maria', 'maría', 'ana', 'elena', 'rosa',
+  'carmen', 'pilar', 'conchita', 'ximena', 'fernanda', 'andrea', 'patricia',
+  // Windows
+  'sabina', 'helena',
+  // Genérico
+  'female', 'mujer', 'femenin',
+];
+
 /**
- * Selecciona la mejor voz en español disponible en el dispositivo.
+ * Determina si una voz es masculina según su nombre.
+ */
+function esVozMasculina(voice: SpeechSynthesisVoice): boolean {
+  const nombre = voice.name.toLowerCase();
+  return VOCES_MASCULINAS.some(m => nombre.includes(m));
+}
+
+/**
+ * Determina si una voz es femenina según su nombre.
+ */
+function esVozFemenina(voice: SpeechSynthesisVoice): boolean {
+  const nombre = voice.name.toLowerCase();
+  return VOCES_FEMENINAS.some(f => nombre.includes(f));
+}
+
+/**
+ * Selecciona la mejor voz en español disponible en el dispositivo,
+ * intentando respetar la preferencia de género.
  * Prioridad: es-CR > es-MX > es-US > es-ES > cualquier es-*
  */
-function seleccionarVoz(): SpeechSynthesisVoice | null {
+function seleccionarVoz(genero: 'masculina' | 'femenina'): SpeechSynthesisVoice | null {
   const voices = speechSynthesis.getVoices();
   if (voices.length === 0) return null;
 
   const esVoices = voices.filter(v => v.lang.startsWith('es'));
-  if (esVoices.length === 0) return voices[0] ?? null;
+  const pool = esVoices.length > 0 ? esVoices : voices;
+
+  // Filtrar por género según el nombre de la voz
+  const porGenero = pool.filter(v =>
+    genero === 'masculina' ? esVozMasculina(v) : esVozFemenina(v)
+  );
 
   const localePrefs = ['es-CR', 'es-MX', 'es-US', 'es-ES', 'es-419'];
+
+  // 1. Buscar voz del género correcto con locale preferido
   for (const locale of localePrefs) {
-    const match = esVoices.find(v => v.lang === locale);
+    const match = porGenero.find(v => v.lang === locale);
     if (match) return match;
   }
 
-  // Preferir voz local (más natural y no requiere red)
-  return esVoices.find(v => v.localService) ?? esVoices[0];
+  // 2. Cualquier voz del género correcto (local primero)
+  if (porGenero.length > 0) {
+    return porGenero.find(v => v.localService) ?? porGenero[0];
+  }
+
+  // 3. Fallback: sin filtro de género, mejor locale disponible
+  for (const locale of localePrefs) {
+    const match = pool.find(v => v.lang === locale);
+    if (match) return match;
+  }
+
+  // 4. Último recurso: preferir voz local
+  return pool.find(v => v.localService) ?? pool[0] ?? null;
 }
 
 /**
@@ -748,12 +812,26 @@ function dispararUtterance(texto: string, voz: 'masculina' | 'femenina'): void {
 
   utterance.lang   = 'es-US';
   utterance.rate   = 0.82 + Math.random() * 0.13;
-  utterance.pitch  = esFemenina
-    ? 1.15 + Math.random() * 0.15
-    : 0.80 + Math.random() * 0.15;
   utterance.volume = 1;
 
-  const selectedVoice = seleccionarVoz();
+  const selectedVoice = seleccionarVoz(voz);
+
+  // Determinar si la voz seleccionada es realmente del género opuesto
+  // para compensar con pitch más agresivo
+  const vozEsFemenina = selectedVoice ? esVozFemenina(selectedVoice) : true;
+  const vozEsMasculina = selectedVoice ? esVozMasculina(selectedVoice) : false;
+  const generoCoincide = esFemenina ? vozEsFemenina : vozEsMasculina;
+
+  if (esFemenina) {
+    // Voz femenina: pitch alto
+    utterance.pitch = 1.15 + Math.random() * 0.15;
+  } else {
+    // Voz masculina: si no encontramos voz masculina real, bajar pitch más agresivamente
+    utterance.pitch = generoCoincide
+      ? 0.85 + Math.random() * 0.10   // voz masculina real → pitch natural
+      : 0.55 + Math.random() * 0.10;  // voz femenina forzada → pitch muy bajo
+  }
+
   if (selectedVoice) {
     utterance.voice = selectedVoice;
     utterance.lang  = selectedVoice.lang;
@@ -797,7 +875,7 @@ export function desbloquearSpeechSynthesis(): void {
   u.volume = 0;
   u.rate   = 2;   // lo más rápido posible para que no se note
 
-  const voice = seleccionarVoz();
+  const voice = seleccionarVoz('femenina');
   if (voice) {
     u.voice = voice;
     u.lang  = voice.lang;

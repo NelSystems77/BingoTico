@@ -717,11 +717,25 @@ export function verificarBingo(numeros: number[][], numerosExtraidos: number[]):
 // SINTETIZAR VOZ — Compatible con iOS Safari, Android y Desktop
 // ============================================================
 
+/** Detecta si estamos en Android */
+function esAndroid(): boolean {
+  return /android/i.test(navigator.userAgent);
+}
+
+/** Detecta si estamos en iOS (iPhone/iPad) */
+function esIOS(): boolean {
+  return /iphone|ipad|ipod/i.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
 // Nombres de voces conocidas como masculinas en Android/iOS/Desktop (español)
 const VOCES_MASCULINAS = [
-  // Android (Google TTS)
+  // Android (Google TTS) — estas son las voces reales que expone Android
   'google español',
   'google español de estados unidos',
+  'google es-us male',
+  'google es-mx male',
+  'google es-es male',
   // iOS / macOS
   'jorge', 'diego', 'carlos', 'juan', 'miguel', 'antonio', 'alejandro',
   'enrique', 'felipe', 'francisco', 'gabriel', 'javier', 'jose', 'luis',
@@ -736,6 +750,9 @@ const VOCES_MASCULINAS = [
 const VOCES_FEMENINAS = [
   // Android (Google TTS)
   'google español femenino',
+  'google es-us female',
+  'google es-mx female',
+  'google es-es female',
   // iOS / macOS
   'paulina', 'monica', 'mónica', 'luciana', 'valentina', 'sofia', 'sofía',
   'isabella', 'camila', 'laura', 'maria', 'maría', 'ana', 'elena', 'rosa',
@@ -744,6 +761,19 @@ const VOCES_FEMENINAS = [
   'sabina', 'helena',
   // Genérico
   'female', 'mujer', 'femenin',
+];
+
+// Voces masculinas en inglés conocidas (fallback para iOS cuando no hay voz
+// masculina en español disponible — suenan mucho mejor que bajar el pitch)
+const VOCES_MASCULINAS_EN = [
+  'daniel',   // iOS en-GB — voz masculina de alta calidad
+  'alex',     // macOS/iOS en-US — voz masculina clásica
+  'fred',     // macOS en-US
+  'tom',      // macOS en-US
+  'oliver',   // iOS en-GB
+  'arthur',   // iOS en-GB
+  'gordon',   // iOS en-AU
+  'rishi',    // iOS en-IN
 ];
 
 /**
@@ -763,9 +793,27 @@ function esVozFemenina(voice: SpeechSynthesisVoice): boolean {
 }
 
 /**
+ * Busca la mejor voz masculina en inglés disponible (fallback para iOS/Android
+ * cuando no hay voz masculina en español).
+ */
+function buscarVozMasculinaIngles(): SpeechSynthesisVoice | null {
+  const voices = speechSynthesis.getVoices();
+  for (const nombreBuscado of VOCES_MASCULINAS_EN) {
+    const voz = voices.find(v => v.name.toLowerCase().includes(nombreBuscado));
+    if (voz) return voz;
+  }
+  return null;
+}
+
+/**
  * Selecciona la mejor voz en español disponible en el dispositivo,
  * intentando respetar la preferencia de género.
- * Prioridad: es-CR > es-MX > es-US > es-ES > cualquier es-*
+ *
+ * Estrategia por plataforma:
+ * - Android masculina: busca "Google español" (voz neutra/masculina nativa)
+ * - iOS masculina: busca "Jorge" → fallback a voz masculina en inglés
+ * - Femenina: busca por nombres femeninos conocidos
+ * Prioridad locale: es-CR > es-MX > es-US > es-ES > cualquier es-*
  */
 function seleccionarVoz(genero: 'masculina' | 'femenina'): SpeechSynthesisVoice | null {
   const voices = speechSynthesis.getVoices();
@@ -773,33 +821,88 @@ function seleccionarVoz(genero: 'masculina' | 'femenina'): SpeechSynthesisVoice 
 
   const esVoices = voices.filter(v => v.lang.startsWith('es'));
   const pool = esVoices.length > 0 ? esVoices : voices;
-
-  // Filtrar por género según el nombre de la voz
-  const porGenero = pool.filter(v =>
-    genero === 'masculina' ? esVozMasculina(v) : esVozFemenina(v)
-  );
-
   const localePrefs = ['es-CR', 'es-MX', 'es-US', 'es-ES', 'es-419'];
 
-  // 1. Buscar voz del género correcto con locale preferido
-  for (const locale of localePrefs) {
-    const match = porGenero.find(v => v.lang === locale);
-    if (match) return match;
-  }
+  if (genero === 'masculina') {
+    // ── Android: estrategia especial ──────────────────────────────────────
+    if (esAndroid()) {
+      // En Android, Google TTS expone voces con nombres como:
+      // "Google español de Estados Unidos", "Google español", etc.
+      // Estas son voces neutras/masculinas de alta calidad.
+      // Buscamos primero por nombre "google" + "español"
+      const googleEs = voices.find(v => {
+        const n = v.name.toLowerCase();
+        return n.includes('google') && (n.includes('español') || n.includes('espanol') || n.includes('es-'));
+      });
+      if (googleEs) return googleEs;
 
-  // 2. Cualquier voz del género correcto (local primero)
-  if (porGenero.length > 0) {
-    return porGenero.find(v => v.localService) ?? porGenero[0];
-  }
+      // Fallback Android: cualquier voz española local
+      const localEs = esVoices.find(v => v.localService);
+      if (localEs) return localEs;
 
-  // 3. Fallback: sin filtro de género, mejor locale disponible
-  for (const locale of localePrefs) {
-    const match = pool.find(v => v.lang === locale);
-    if (match) return match;
-  }
+      // Fallback Android: primera voz española disponible
+      if (esVoices.length > 0) return esVoices[0];
+    }
 
-  // 4. Último recurso: preferir voz local
-  return pool.find(v => v.localService) ?? pool[0] ?? null;
+    // ── iOS: estrategia especial ──────────────────────────────────────────
+    if (esIOS()) {
+      // Buscar "Jorge" (voz masculina española en iOS, no siempre disponible)
+      const jorge = voices.find(v => v.name.toLowerCase().includes('jorge'));
+      if (jorge) return jorge;
+
+      // iOS no tiene buena voz masculina en español → usar voz masculina en inglés
+      // (suena MUCHO mejor que bajar el pitch de Paulina)
+      const vozEnIngles = buscarVozMasculinaIngles();
+      if (vozEnIngles) return vozEnIngles;
+    }
+
+    // ── Desktop y fallback general ────────────────────────────────────────
+    const porGenero = pool.filter(v => esVozMasculina(v));
+
+    // 1. Voz masculina con locale preferido
+    for (const locale of localePrefs) {
+      const match = porGenero.find(v => v.lang === locale);
+      if (match) return match;
+    }
+
+    // 2. Cualquier voz masculina (local primero)
+    if (porGenero.length > 0) {
+      return porGenero.find(v => v.localService) ?? porGenero[0];
+    }
+
+    // 3. Sin voz masculina encontrada → voz masculina en inglés como último recurso
+    const vozEnIngles = buscarVozMasculinaIngles();
+    if (vozEnIngles) return vozEnIngles;
+
+    // 4. Último recurso: cualquier voz española
+    for (const locale of localePrefs) {
+      const match = pool.find(v => v.lang === locale);
+      if (match) return match;
+    }
+    return pool.find(v => v.localService) ?? pool[0] ?? null;
+
+  } else {
+    // ── Voz femenina ──────────────────────────────────────────────────────
+    const porGenero = pool.filter(v => esVozFemenina(v));
+
+    // 1. Voz femenina con locale preferido
+    for (const locale of localePrefs) {
+      const match = porGenero.find(v => v.lang === locale);
+      if (match) return match;
+    }
+
+    // 2. Cualquier voz femenina (local primero)
+    if (porGenero.length > 0) {
+      return porGenero.find(v => v.localService) ?? porGenero[0];
+    }
+
+    // 3. Fallback: mejor locale disponible
+    for (const locale of localePrefs) {
+      const match = pool.find(v => v.lang === locale);
+      if (match) return match;
+    }
+    return pool.find(v => v.localService) ?? pool[0] ?? null;
+  }
 }
 
 /**
@@ -810,26 +913,35 @@ function dispararUtterance(texto: string, voz: 'masculina' | 'femenina'): void {
   const esFemenina = voz === 'femenina';
   const utterance = new SpeechSynthesisUtterance(texto);
 
-  utterance.lang   = 'es-US';
-  utterance.rate   = 0.82 + Math.random() * 0.13;
   utterance.volume = 1;
 
   const selectedVoice = seleccionarVoz(voz);
 
-  // Determinar si la voz seleccionada es realmente del género opuesto
-  // para compensar con pitch más agresivo
-  const vozEsFemenina = selectedVoice ? esVozFemenina(selectedVoice) : true;
-  const vozEsMasculina = selectedVoice ? esVozMasculina(selectedVoice) : false;
-  const generoCoincide = esFemenina ? vozEsFemenina : vozEsMasculina;
-
   if (esFemenina) {
-    // Voz femenina: pitch alto
-    utterance.pitch = 1.15 + Math.random() * 0.15;
+    // Voz femenina: pitch ligeramente alto, velocidad natural
+    utterance.pitch = 1.15 + Math.random() * 0.10;
+    utterance.rate  = 0.82 + Math.random() * 0.13;
+    utterance.lang  = 'es-US';
   } else {
-    // Voz masculina: si no encontramos voz masculina real, bajar pitch más agresivamente
-    utterance.pitch = generoCoincide
-      ? 0.85 + Math.random() * 0.10   // voz masculina real → pitch natural
-      : 0.55 + Math.random() * 0.10;  // voz femenina forzada → pitch muy bajo
+    // Voz masculina
+    const esVozIngles = selectedVoice
+      ? selectedVoice.lang.startsWith('en')
+      : false;
+
+    if (esVozIngles) {
+      // Voz masculina en inglés (fallback iOS/Android):
+      // pitch natural masculino, velocidad un poco más lenta para que
+      // el español suene más claro con motor inglés
+      utterance.pitch = 0.90 + Math.random() * 0.10;
+      utterance.rate  = 0.72 + Math.random() * 0.10;
+      utterance.lang  = selectedVoice!.lang;
+    } else {
+      // Voz masculina en español (Android Google TTS, Jorge, Windows Pablo…):
+      // pitch natural, sin manipulación agresiva
+      utterance.pitch = 0.90 + Math.random() * 0.10;
+      utterance.rate  = 0.82 + Math.random() * 0.13;
+      utterance.lang  = 'es-US';
+    }
   }
 
   if (selectedVoice) {

@@ -11,15 +11,23 @@
  * Estrategia de lazy loading:
  *   • Los archivos NO se cargan al iniciar la app.
  *   • Cuando el usuario elige un género y arranca el juego, se llama a
- *     `precargarGenero()` que descarga en segundo plano todos los MP3 del
- *     género seleccionado y los guarda como URLs en un Map.
+ *     `precargarGenero()` que registra las URLs en el cache y opcionalmente
+ *     precarga los primeros números con HTMLAudioElement para reducir latencia.
  *   • Cada número tiene dos variantes: base (N.mp3) y variación (N_var.mp3).
  *     Se elige aleatoriamente cuál reproducir.
  *   • IMPORTANTE: En Safari/iOS y Android NO se reutilizan objetos Audio;
  *     se crea un nuevo HTMLAudioElement en cada reproducción para evitar
  *     el bloqueo de autoplay por reutilización de elementos.
  *   • Si el navegador no soporta Audio o hay un error de red, se devuelve
- *     `null` para que el llamador use SpeechSynthesis como fallback.
+ *     `false` para que el llamador use SpeechSynthesis como fallback.
+ *
+ * CAMBIOS v2 (fix iOS Safari / Android):
+ *   • Se eliminó la verificación fetch HEAD — era innecesaria para URLs
+ *     estáticas conocidas y causaba bloqueos en iOS Safari y Android WebView.
+ *   • precargarGenero() ahora registra las URLs directamente en el cache
+ *     (sin red) y reporta progreso de forma síncrona → la barra avanza siempre.
+ *   • reproducirNumero() usa preload='auto' para que iOS pueda buffear el
+ *     audio antes de play(), reduciendo errores de "no user gesture".
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -35,16 +43,16 @@ const BASE_PATHS: Record<GeneroAudio, string> = {
 const TOTAL_NUMEROS = 90;
 
 /**
- * Cache de URLs verificadas (fetch exitoso).
+ * Cache de URLs (registradas sin verificación de red).
  * Guardamos solo la URL, NO el objeto Audio, para evitar problemas
  * de reutilización en Safari/iOS y Android.
  */
 const cacheURLs = new Map<GeneroAudio, Map<number, { base: string; variacion: string }>>();
 
-/** Indica si la precarga de un género ya fue iniciada (evita doble fetch) */
+/** Indica si la precarga de un género ya fue iniciada (evita doble ejecución) */
 const precargaIniciada = new Set<GeneroAudio>();
 
-/** Indica si la precarga de un género ya completó todos los archivos */
+/** Indica si la precarga de un género ya completó */
 const precargaCompleta = new Set<GeneroAudio>();
 
 /** Elemento de audio actualmente en reproducción (para poder detenerlo) */
@@ -60,31 +68,30 @@ function urlAudio(genero: GeneroAudio, numero: number, variacion: boolean): stri
 }
 
 /**
- * Verifica que una URL de audio sea accesible mediante fetch HEAD.
- * Más confiable que HTMLAudioElement.canplaythrough en Safari/iOS.
- * Devuelve la URL si es accesible, o null si falla.
+ * Detecta si el dispositivo es iOS Safari o Android.
+ * En estos entornos se aplican estrategias especiales de audio.
  */
-async function verificarURL(url: string): Promise<string | null> {
-  try {
-    const resp = await fetch(url, { method: 'HEAD', cache: 'force-cache' });
-    if (resp.ok) return url;
-    return null;
-  } catch {
-    // fetch puede fallar en algunos entornos (CORS, offline, etc.)
-    // En ese caso asumimos que la URL es válida para no bloquear el juego
-    return url;
-  }
+function esIOSSafari(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent;
+  return /iP(hone|od|ad)/i.test(ua) && /WebKit/i.test(ua) && !/CriOS|FxiOS|OPiOS/i.test(ua);
+}
+
+function esAndroid(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /Android/i.test(navigator.userAgent);
 }
 
 // ─── API pública ─────────────────────────────────────────────────────────────
 
 /**
- * Inicia la precarga en segundo plano de todos los archivos MP3
- * del género indicado. Es seguro llamarlo múltiples veces; solo
- * ejecuta la carga una vez por género.
+ * Registra en el cache las URLs de todos los archivos MP3 del género indicado.
+ * NO realiza ninguna petición de red — las URLs son estáticas y conocidas.
+ * El progreso se reporta de forma síncrona para que la barra de carga avance
+ * correctamente en iOS Safari y Android (donde fetch HEAD puede bloquearse).
  *
- * @param genero  'masculina' | 'femenina'
- * @param onProgreso  Callback opcional (numero cargado, total) para UI de progreso
+ * @param genero      'masculina' | 'femenina'
+ * @param onProgreso  Callback opcional (cargados, total) para UI de progreso
  */
 export async function precargarGenero(
   genero: GeneroAudio,
@@ -101,47 +108,59 @@ export async function precargarGenero(
   const total = TOTAL_NUMEROS * 2; // base + variación por número
   let cargados = 0;
 
-  console.log(`[AudioService] Iniciando precarga de voz ${genero} (${TOTAL_NUMEROS} números × 2 variantes)`);
+  console.log(`[AudioService] Registrando URLs de voz ${genero} (${TOTAL_NUMEROS} números × 2 variantes)`);
 
-  // Cargamos de a lotes de 10 para no saturar la red
-  const LOTE = 10;
-  for (let inicio = 1; inicio <= TOTAL_NUMEROS; inicio += LOTE) {
-    const fin = Math.min(inicio + LOTE - 1, TOTAL_NUMEROS);
-    const promesas: Promise<void>[] = [];
+  // Registrar URLs de forma síncrona — sin fetch, sin red
+  // Esto garantiza que la barra de progreso avance en todos los navegadores,
+  // incluyendo iOS Safari y Android WebView donde fetch HEAD puede bloquearse.
+  for (let n = 1; n <= TOTAL_NUMEROS; n++) {
+    const urlBase = urlAudio(genero, n, false);
+    const urlVar  = urlAudio(genero, n, true);
 
-    for (let n = inicio; n <= fin; n++) {
-      const num = n;
-      const urlBase = urlAudio(genero, num, false);
-      const urlVar  = urlAudio(genero, num, true);
+    mapaGenero.set(n, { base: urlBase, variacion: urlVar });
+    cargados += 2;
+    onProgreso?.(cargados, total);
 
-      const p = Promise.all([
-        verificarURL(urlBase),
-        verificarURL(urlVar),
-      ])
-        .then(([base, variacion]) => {
-          // Guardar las URLs verificadas (o las originales si fetch falló)
-          mapaGenero.set(num, {
-            base:     base     ?? urlBase,
-            variacion: variacion ?? urlVar,
-          });
-          cargados += 2;
-          onProgreso?.(cargados, total);
-        })
-        .catch(() => {
-          // Si falla, guardar las URLs de todas formas
-          mapaGenero.set(num, { base: urlBase, variacion: urlVar });
-          cargados += 2;
-          onProgreso?.(cargados, total);
-        });
-
-      promesas.push(p);
+    // Ceder el hilo cada 10 números para no bloquear el render de React
+    // y permitir que la barra de progreso se actualice visualmente.
+    if (n % 10 === 0) {
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
     }
-
-    await Promise.all(promesas);
   }
 
   precargaCompleta.add(genero);
-  console.log(`[AudioService] ✅ Precarga completa: voz ${genero}`);
+  console.log(`[AudioService] ✅ URLs registradas: voz ${genero}`);
+
+  // En iOS Safari y Android, precargamos los primeros 10 números con Audio
+  // para reducir la latencia del primer sonido (sin bloquear el juego).
+  if (esIOSSafari() || esAndroid()) {
+    _precalentarPrimeros(genero, mapaGenero);
+  }
+}
+
+/**
+ * Precalienta los primeros N números creando HTMLAudioElement con preload='auto'.
+ * Solo se ejecuta en iOS/Android para reducir latencia del primer audio.
+ * No bloquea el flujo principal.
+ */
+function _precalentarPrimeros(
+  genero: GeneroAudio,
+  mapaGenero: Map<number, { base: string; variacion: string }>,
+  cantidad = 10
+): void {
+  console.log(`[AudioService] Precalentando primeros ${cantidad} números para ${genero} (iOS/Android)`);
+  for (let n = 1; n <= Math.min(cantidad, TOTAL_NUMEROS); n++) {
+    const entrada = mapaGenero.get(n);
+    if (!entrada) continue;
+    try {
+      const el = new Audio();
+      el.preload = 'auto';
+      el.src = entrada.base;
+      // No llamamos play() — solo cargamos el buffer
+    } catch {
+      // ignorar errores de precalentamiento
+    }
+  }
 }
 
 /**
@@ -151,10 +170,12 @@ export async function precargarGenero(
  * • Se crea un NUEVO HTMLAudioElement en cada reproducción.
  *   Reutilizar el mismo elemento causa que Safari rechace play()
  *   porque el elemento ya no está "fresco" desde la interacción del usuario.
+ * • preload='auto' permite que iOS buffeé el audio antes de play(),
+ *   reduciendo errores de "no user gesture" en reproducción rápida.
  * • Se retorna una Promise<boolean> que resuelve true si el audio
  *   se reprodujo correctamente, false si falló (para activar TTS fallback).
  *
- * @returns Promise<boolean> — true = reproducción exitosa, false = falló
+ * @returns Promise<boolean> — true = reproducción iniciada, false = falló
  */
 export function reproducirNumero(
   numero: number,
@@ -191,19 +212,31 @@ export function reproducirNumero(
 
   // SIEMPRE crear un nuevo HTMLAudioElement (crítico para Safari/iOS y Android)
   const audioEl = new Audio();
-  audioEl.preload = 'none'; // no precargar — solo reproducir cuando se llame play()
+
+  // preload='auto': permite que iOS/Android buffeé el audio antes de play().
+  // Con preload='none' en iOS, play() puede fallar si el buffer no está listo
+  // en el momento exacto del gesto del usuario.
+  audioEl.preload = 'auto';
   audioEl.src = url;
   audioActivo = audioEl;
 
   return new Promise<boolean>((resolve) => {
-    const onError = () => {
+    let resuelto = false;
+
+    const resolver = (valor: boolean) => {
+      if (resuelto) return;
+      resuelto = true;
       cleanup();
+      resolve(valor);
+    };
+
+    const onError = () => {
       console.warn(`[AudioService] Error reproduciendo ${genero}/${numero} (${url})`);
-      resolve(false);
+      resolver(false);
     };
 
     const onEnded = () => {
-      cleanup();
+      // Audio terminó correctamente — no necesitamos hacer nada más
     };
 
     const cleanup = () => {
@@ -221,17 +254,16 @@ export function reproducirNumero(
       promesaPlay
         .then(() => {
           // Reproducción iniciada correctamente
-          resolve(true);
+          resolver(true);
         })
         .catch((err) => {
-          cleanup();
           // AutoPlay bloqueado o error de red → fallback TTS
           console.warn(`[AudioService] play() rechazado para ${genero}/${numero}:`, err);
-          resolve(false);
+          resolver(false);
         });
     } else {
       // Navegadores antiguos que no devuelven Promise (muy raro)
-      resolve(true);
+      resolver(true);
     }
   });
 }

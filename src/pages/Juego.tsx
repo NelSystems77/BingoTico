@@ -28,7 +28,6 @@ export default function Juego() {
   const [progresoCarga, setProgresoCarga] = useState(0);
 
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
-  const audioDesbloqueadoRef = useRef(false);
   // Ref para acceder al partida actual dentro del intervalo sin stale closure
   const partidaRef = useRef<Partida | null>(null);
   useEffect(() => { partidaRef.current = partida; }, [partida]);
@@ -38,11 +37,11 @@ export default function Juego() {
   // más reciente de extraerBola (con el config.voz actual).
   const extraerBolaRef = useRef<() => void>(() => {});
 
-  // ── iOS Safari: desbloquear AudioContext con el primer gesto del usuario ──
+  // ── iOS Safari: desbloquear AudioContext en CADA gesto del usuario ──────
+  // No usar guard de "solo una vez" — iOS puede suspender el AudioContext
+  // al volver de background, y necesitamos re-desbloquearlo con cada tap.
   const desbloquearAudio = () => {
-    if (audioDesbloqueadoRef.current) return;
-    audioDesbloqueadoRef.current = true;
-    desbloquearAudioContext(); // desbloquear AudioContext para Safari/Android
+    desbloquearAudioContext();
   };
 
   // ── Precarga lazy de audio al montar el componente ───────────────

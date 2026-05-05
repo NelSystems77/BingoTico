@@ -286,28 +286,26 @@ export function desbloquearAudioContext(): void {
   const ctx = obtenerAudioContext();
   if (!ctx) return;
 
-  // iOS Safari requiere reproducir un buffer real (aunque sea silencioso)
-  // desde el gesto del usuario para que el AudioContext quede verdaderamente
-  // desbloqueado. resume() solo no es suficiente en iOS.
-  const playSilent = () => {
-    try {
-      const buf = ctx.createBuffer(1, 1, 22050);
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
-      src.connect(ctx.destination);
-      src.start(0);
-      console.log('[AudioService] ✅ AudioContext desbloqueado');
-    } catch {
-      // ignorar — el contexto puede ya estar listo
-    }
-  };
+  // iOS Safari exige que src.start() se llame SINCRÓNICAMENTE dentro del
+  // handler del gesto. Llamarlo en .then() (microtask) ya no cuenta como
+  // gesto para Safari — por eso el unlock fallaba aunque resume() tuviera éxito.
+  try {
+    const buf = ctx.createBuffer(1, 1, 22050);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    src.start(0); // síncrono — iOS acepta esto como gesto real
+  } catch {
+    // puede fallar si el contexto está suspended; no es crítico
+  }
 
-  if (ctx.state === 'suspended') {
-    ctx.resume().then(playSilent).catch((err) => {
-      console.warn('[AudioService] No se pudo desbloquear AudioContext:', err);
-    });
+  // Adicionalmente hacer resume() para llevar el contexto a 'running'
+  if (ctx.state !== 'running') {
+    ctx.resume()
+      .then(() => console.log('[AudioService] ✅ AudioContext corriendo'))
+      .catch(err => console.warn('[AudioService] resume() falló:', err));
   } else {
-    playSilent();
+    console.log('[AudioService] ✅ AudioContext desbloqueado');
   }
 }
 

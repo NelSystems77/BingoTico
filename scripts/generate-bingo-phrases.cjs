@@ -1,8 +1,9 @@
 /**
  * Script para generar audios de frases de bingo costarricense
- * Voz: IKne3meq5aSn9XLyUdCD - Charlie (masculina, plan gratuito)
- * Genera/reemplaza los archivos N_var.mp3 en public/audio/numbers/
- * Total: 90 frases = 2,391 caracteres (cuota disponible: ~4,847)
+ * Voz: IKne3meq5aSn9XLyUdCD - Charlie (masculina)
+ * Genera N_call1.mp3 y N_call2.mp3 para números 1-75
+ * Destino: public/audio/numbers-male/
+ * Total: 150 archivos
  * Formato: MP3 44.1 kHz, 128 kbps
  */
 
@@ -10,102 +11,91 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
-const API_KEY = 'sk_d987440989dbb903dd91578efbdcf10827498b82838631a7';
+const API_KEY = 'sk_907c37a2c4605f6bff3ebec3ef527522002320889197249f';
 const VOICE_ID = 'IKne3meq5aSn9XLyUdCD'; // Charlie - Deep, Confident, Energetic
-const OUTPUT_DIR = path.join(__dirname, '..', 'public', 'audio', 'numbers');
+const OUTPUT_DIR = path.join(__dirname, '..', 'public', 'audio', 'numbers-male');
 
-// Frases de bingo costarricense para cada número del 1 al 90
+// Dos frases TTS por número: [call1, call2]
 const bingoFrases = {
-  1:  'El primero de la tanda, el uno',
-  2:  'El patito solo en el agua, el dos',
-  3:  'La Santísima Trinidad, el tres',
-  4:  'Como las patas del gato, el cuatro',
-  5:  'Los dedos de la mano, el cinco',
-  6:  'Media docena de huevos, el seis',
-  7:  'El hacha de mi abuelo, el siete',
-  8:  'Comiendo bizcocho, el ocho',
-  9:  'El rabo del chancho, el nueve',
-  10: 'Diez deditos, el diez',
-  11: 'Las canillas de mi abuela, el once',
-  12: 'Docena de huevos, el doce',
-  13: 'Que no nos traiga mala suerte, el trece',
-  14: 'Limpio y esperando que paguen, el catorce',
-  15: 'La quinceañera del barrio, el quince',
-  16: 'La hora del café, el dieciséis',
-  17: 'Se mete la suerte, el diecisiete',
-  18: 'El mayor de edad, el dieciocho',
-  19: 'Falta uno para los veinte, el diecinueve',
-  20: 'Pato con huevo, el veinte',
-  21: 'El veintiuno',
-  22: 'Los dos patitos en el agua, el veintidós',
-  23: 'El veintitrés',
-  24: 'Nochebuena, el veinticuatro',
-  25: 'Nació el Niño Dios, el veinticinco',
-  26: 'El veintiséis',
-  27: 'El veintisiete',
-  28: 'El veintiocho',
-  29: 'El veintinueve',
-  30: 'El treinta',
-  31: 'El vacilón continúa, el treinta y uno',
-  32: 'El treinta y dos',
-  33: 'La edad de Cristo, el treinta y tres',
-  34: 'La cabeza del gato, el treinta y cuatro',
-  35: 'El loquillo del pueblo, el treinta y cinco',
-  36: 'Búsquelo bien, el treinta y seis',
-  37: 'El treinta y siete',
-  38: 'El treinta y ocho',
-  39: 'El treinta y nueve',
-  40: 'El cuarenta',
-  41: 'Cae uno por uno, el cuarenta y uno',
-  42: 'El cuarenta y dos',
-  43: 'El cuarenta y tres',
-  44: 'Las dos sillitas de la escuela, el cuarenta y cuatro',
-  45: 'A medio camino, el cuarenta y cinco',
-  46: 'Pura vida mae, el cuarenta y seis',
-  47: 'El cuarenta y siete',
-  48: 'El viejo chocho, el cuarenta y ocho',
-  49: 'El cuarenta y nueve',
-  50: 'La media teja, el cincuenta',
-  51: 'El cincuenta y uno',
-  52: 'Sin codos, el cincuenta y dos',
-  53: 'El cincuenta y tres',
-  54: 'Ojo con el gato, el cincuenta y cuatro',
-  55: 'Pegando un brinco, el cincuenta y cinco',
-  56: 'El cincuenta y seis',
-  57: 'El cincuenta y siete',
-  58: 'El cincuenta y ocho',
-  59: 'Pero mira como se mueve, el cincuenta y nueve',
-  60: 'Venga y se sienta, el sesenta',
-  61: 'El sesenta y uno',
-  62: 'El sesenta y dos',
-  63: 'El sesenta y tres',
-  64: 'El sesenta y cuatro',
-  65: 'Brinquito de alegría, el sesenta y cinco',
-  66: 'Dos monjitas, el sesenta y seis',
-  67: 'El sesenta y siete',
-  68: 'Que sirvan el bizcocho, el sesenta y ocho',
-  69: 'Arriba y abajo, el sesenta y nueve',
-  70: 'El setenta',
-  71: 'La bruja, el setenta y uno',
-  72: 'Los dos de la fila, el setenta y dos',
-  73: 'El setenta y tres',
-  74: 'El setenta y cuatro',
-  75: 'El que limpia el cartón, el setenta y cinco',
-  76: 'El setenta y seis',
-  77: 'Las dos hachas para la leña, el setenta y siete',
-  78: 'El setenta y ocho',
-  79: 'El setenta y nueve',
-  80: 'La gente está atenta, el ochenta',
-  81: 'El ochenta y uno',
-  82: 'Los dos amigos de siempre, el ochenta y dos',
-  83: 'El ochenta y tres',
-  84: 'El ochenta y cuatro',
-  85: 'El último brinco, el ochenta y cinco',
-  86: 'El ochenta y seis',
-  87: 'El ochenta y siete',
-  88: 'El ochenta y ocho',
-  89: 'El ochenta y nueve',
-  90: 'El tata del bingo, el noventa',
+  1:  ['Letra: B, El primero de la tanda, el uno',            'Letra: B, Solito, el uno'],
+  2:  ['Letra: B, El patito solo en el agua, el dos',         'Letra: B, El patito, el dos'],
+  3:  ['Letra: B, La Santísima Trinidad, el tres',            'Letra: B, La Trinidad, el tres'],
+  4:  ['Letra: B, Como las patas del gato, el cuatro',        'Letra: B, La sillita al revés, el cuatro'],
+  5:  ['Letra: B, Los dedos de la mano, el cinco',            'Letra: B, Como los sentidos, el cinco'],
+  6:  ['Letra: B, Media docena de huevos, el seis',           'Letra: B, La media docena, el seis'],
+  7:  ['Letra: B, El hacha de mi abuelo, el siete',           'Letra: B, El de la suerte, el siete'],
+  8:  ['Letra: B, Comiendo bizcocho, el ocho',                'Letra: B, El chavo del ocho, el ocho'],
+  9:  ['Letra: B, El rabo del chancho, el nueve',             'Letra: B, El nueve, el nueve'],
+  10: ['Letra: B, Diez deditos, el diez',                     'Letra: B, Manitas juntas, el diez'],
+  11: ['Letra: B, Las canillas de mi abuela, el once',        'Letra: B, Las estacas del potrero, el once'],
+  12: ['Letra: B, Docena de huevos, el doce',                 'Letra: B, El doce, el doce'],
+  13: ['Letra: B, Que no nos traiga mala suerte, el trece',   'Letra: B, Que no caiga viernes, el trece'],
+  14: ['Letra: B, Limpio y esperando que paguen, el catorce', 'Letra: B, El catorce, el catorce'],
+  15: ['Letra: B, La quinceañera del barrio, el quince',      'Letra: B, El quince, el quince'],
+
+  16: ['Letra: I, La hora del café, el dieciséis',            'Letra: I, El dieciséis, el dieciséis'],
+  17: ['Letra: I, Se mete la suerte, el diecisiete',          'Letra: I, Palo y hacha, el diecisiete'],
+  18: ['Letra: I, El mayor de edad, el dieciocho',            'Letra: I, Ya es legal, el dieciocho'],
+  19: ['Letra: I, Falta uno para los veinte, el diecinueve',  'Letra: I, Casi veinte, el diecinueve'],
+  20: ['Letra: I, Pato con huevo, el veinte',                 'Letra: I, Veinte redondo, el veinte'],
+  21: ['Letra: I, El veintiuno, el veintiuno',                'Letra: I, El que no sabe, el veintiuno'],
+  22: ['Letra: I, Los dos patitos en el agua, el veintidós',  'Letra: I, Los patitos, el veintidós'],
+  23: ['Letra: I, El veintitrés, el veintitrés',              'Letra: I, Vuelva a ver, el veintitrés'],
+  24: ['Letra: I, Nochebuena, el veinticuatro',               'Letra: I, La noche buena, el veinticuatro'],
+  25: ['Letra: I, Nació el Niño Dios, el veinticinco',        'Letra: I, Navidad, el veinticinco'],
+  26: ['Letra: I, El veintiséis, el veintiséis',              'Letra: I, Como debe ser, el veintiséis'],
+  27: ['Letra: I, El veintisiete, el veintisiete',            'Letra: I, Apriete el cartón, el veintisiete'],
+  28: ['Letra: I, El veintiocho, el veintiocho',              'Letra: I, Qué derroche, el veintiocho'],
+  29: ['Letra: I, El veintinueve, el veintinueve',            'Letra: I, Antes del treinta, el veintinueve'],
+  30: ['Letra: I, El treinta, el treinta',                    'Letra: I, Se pone bueno, el treinta'],
+
+  31: ['Letra: N, El vacilón continúa, el treinta y uno',     'Letra: N, Seguimos, el treinta y uno'],
+  32: ['Letra: N, El treinta y dos, el treinta y dos',        'Letra: N, Vámonos los dos, el treinta y dos'],
+  33: ['Letra: N, La edad de Cristo, el treinta y tres',      'Letra: N, Treinta y tres, el treinta y tres'],
+  34: ['Letra: N, La cabeza del gato, el treinta y cuatro',   'Letra: N, Cabeza de gato, el treinta y cuatro'],
+  35: ['Letra: N, El loquillo del pueblo, el treinta y cinco','Letra: N, El loco, el treinta y cinco'],
+  36: ['Letra: N, Búsquelo bien, el treinta y seis',          'Letra: N, A buscar, el treinta y seis'],
+  37: ['Letra: N, El treinta y siete, el treinta y siete',    'Letra: N, Pura suerte, el treinta y siete'],
+  38: ['Letra: N, El treinta y ocho, el treinta y ocho',      'Letra: N, Trasnochado, el treinta y ocho'],
+  39: ['Letra: N, El treinta y nueve, el treinta y nueve',    'Letra: N, Se mueve, el treinta y nueve'],
+  40: ['Letra: N, El cuarenta, el cuarenta',                  'Letra: N, Se puso bueno, el cuarenta'],
+  41: ['Letra: N, Cae uno por uno, el cuarenta y uno',        'Letra: N, Uno a uno, el cuarenta y uno'],
+  42: ['Letra: N, El cuarenta y dos, el cuarenta y dos',      'Letra: N, El perdido, el cuarenta y dos'],
+  43: ['Letra: N, El cuarenta y tres, el cuarenta y tres',    'Letra: N, Se la sabe, el cuarenta y tres'],
+  44: ['Letra: N, Las dos sillitas de la escuela, el cuarenta y cuatro', 'Letra: N, Las sillitas, el cuarenta y cuatro'],
+  45: ['Letra: N, A medio camino, el cuarenta y cinco',       'Letra: N, La mitad, el cuarenta y cinco'],
+
+  46: ['Letra: G, Pura vida mae, el cuarenta y seis',         'Letra: G, Pura vida, el cuarenta y seis'],
+  47: ['Letra: G, El cuarenta y siete, el cuarenta y siete',  'Letra: G, Suerte, el cuarenta y siete'],
+  48: ['Letra: G, El viejo chocho, el cuarenta y ocho',       'Letra: G, El chocho, el cuarenta y ocho'],
+  49: ['Letra: G, El cuarenta y nueve, el cuarenta y nueve',  'Letra: G, No se duerma, el cuarenta y nueve'],
+  50: ['Letra: G, La media teja, el cincuenta',               'Letra: G, Media teja, el cincuenta'],
+  51: ['Letra: G, El cincuenta y uno, el cincuenta y uno',    'Letra: G, Ya casi, el cincuenta y uno'],
+  52: ['Letra: G, Sin codos, el cincuenta y dos',             'Letra: G, Rece un toque, el cincuenta y dos'],
+  53: ['Letra: G, El cincuenta y tres, el cincuenta y tres',  'Letra: G, No se quede, el cincuenta y tres'],
+  54: ['Letra: G, Ojo con el gato, el cincuenta y cuatro',    'Letra: G, El gato, el cincuenta y cuatro'],
+  55: ['Letra: G, Pegando un brinco, el cincuenta y cinco',   'Letra: G, El brinco, el cincuenta y cinco'],
+  56: ['Letra: G, El cincuenta y seis, el cincuenta y seis',  'Letra: G, Maicito, el cincuenta y seis'],
+  57: ['Letra: G, El cincuenta y siete, el cincuenta y siete','Letra: G, Apriete, el cincuenta y siete'],
+  58: ['Letra: G, El cincuenta y ocho, el cincuenta y ocho',  'Letra: G, Bien tostado, el cincuenta y ocho'],
+  59: ['Letra: G, Pero mira como se mueve, el cincuenta y nueve', 'Letra: G, Se mueve, el cincuenta y nueve'],
+  60: ['Letra: G, Venga y se sienta, el sesenta',             'Letra: G, Ya calienta, el sesenta'],
+
+  61: ['Letra: O, El sesenta y uno, el sesenta y uno',        'Letra: O, Uno más, el sesenta y uno'],
+  62: ['Letra: O, El sesenta y dos, el sesenta y dos',        'Letra: O, Vámonos, el sesenta y dos'],
+  63: ['Letra: O, El sesenta y tres, el sesenta y tres',      'Letra: O, Revise, el sesenta y tres'],
+  64: ['Letra: O, El sesenta y cuatro, el sesenta y cuatro',  'Letra: O, La suerte, el sesenta y cuatro'],
+  65: ['Letra: O, Brinquito de alegría, el sesenta y cinco',  'Letra: O, Brinquito, el sesenta y cinco'],
+  66: ['Letra: O, Dos monjitas, el sesenta y seis',           'Letra: O, Las monjas, el sesenta y seis'],
+  67: ['Letra: O, El sesenta y siete, el sesenta y siete',    'Letra: O, Se asoma, el sesenta y siete'],
+  68: ['Letra: O, Que sirvan el bizcocho, el sesenta y ocho', 'Letra: O, Ya huele a bizcocho, el sesenta y ocho'],
+  69: ['Letra: O, Arriba y abajo, el sesenta y nueve',        'Letra: O, Arriba y abajo, el sesenta y nueve'],
+  70: ['Letra: O, El setenta, el setenta',                    'Letra: O, De película, el setenta'],
+  71: ['Letra: O, La bruja, el setenta y uno',                'Letra: O, La bruja, el setenta y uno'],
+  72: ['Letra: O, Los dos de la fila, el setenta y dos',      'Letra: O, Los de la fila, el setenta y dos'],
+  73: ['Letra: O, El setenta y tres, el setenta y tres',      'Letra: O, No se pierda, el setenta y tres'],
+  74: ['Letra: O, El setenta y cuatro, el setenta y cuatro',  'Letra: O, Ojo al número, el setenta y cuatro'],
+  75: ['Letra: O, El que limpia el cartón, el setenta y cinco','Letra: O, Cartón limpio, el setenta y cinco'],
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -113,7 +103,7 @@ const bingoFrases = {
 function generateAudio(text, outputPath) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
-      text: text,
+      text,
       model_id: 'eleven_multilingual_v2',
       voice_settings: {
         stability: 0.5,
@@ -142,7 +132,7 @@ function generateAudio(text, outputPath) {
         return;
       }
       const chunks = [];
-      res.on('data', (chunk) => { chunks.push(chunk); });
+      res.on('data', (chunk) => chunks.push(chunk));
       res.on('end', () => {
         const buffer = Buffer.concat(chunks);
         fs.writeFileSync(outputPath, buffer);
@@ -188,29 +178,33 @@ function sleep(ms) {
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  console.log('='.repeat(65));
-  console.log('GENERADOR DE FRASES DE BINGO COSTARRICENSE');
-  console.log('Voz: Charlie (IKne3meq5aSn9XLyUdCD) - Masculina');
-  console.log('Destino: public/audio/numbers/N_var.mp3');
-  console.log('='.repeat(65));
-
-  // Calcular total de caracteres
+  // Construir lista de tareas: 2 por número (call1 y call2)
+  const tasks = [];
   let totalChars = 0;
-  for (let i = 1; i <= 90; i++) totalChars += bingoFrases[i].length;
-  console.log('\nTotal frases:      90');
+  for (let i = 1; i <= 75; i++) {
+    const [c1, c2] = bingoFrases[i];
+    tasks.push({ num: i, slot: 'call1', text: c1, file: i + '_call1.mp3' });
+    tasks.push({ num: i, slot: 'call2', text: c2, file: i + '_call2.mp3' });
+    totalChars += c1.length + c2.length;
+  }
+
+  console.log('='.repeat(65));
+  console.log('GENERADOR DE FRASES DE BINGO - VOZ MASCULINA (Charlie)');
+  console.log('Números: 1–75  |  2 frases cada uno  |  150 archivos');
+  console.log('Destino: public/audio/numbers-male/');
+  console.log('='.repeat(65));
+  console.log('\nTotal archivos:    ' + tasks.length);
   console.log('Total caracteres:  ' + totalChars);
 
-  // Verificar cuota
   const initialQuota = await getRemainingQuota();
   console.log('Cuota disponible:  ' + initialQuota + ' caracteres');
   console.log('Sobrante estimado: ' + (initialQuota - totalChars) + ' caracteres\n');
 
   if (initialQuota < totalChars) {
-    console.log('ERROR: Cuota insuficiente. Necesitas ' + totalChars + ' pero solo tienes ' + initialQuota);
+    console.log('ERROR: Cuota insuficiente. Necesitas ' + totalChars + ' pero tienes ' + initialQuota);
     process.exit(1);
   }
 
-  // Asegurar que el directorio existe
   if (!fs.existsSync(OUTPUT_DIR)) {
     fs.mkdirSync(OUTPUT_DIR, { recursive: true });
     console.log('Directorio creado: ' + OUTPUT_DIR);
@@ -219,47 +213,47 @@ async function main() {
   let success = 0;
   let errors = 0;
   let charsUsed = 0;
+  const failed = [];
 
   console.log('='.repeat(65));
-  console.log('Generando 90 archivos _var.mp3 con frases de bingo...');
-  console.log('(Los archivos existentes seran REEMPLAZADOS)');
+  console.log('Generando ' + tasks.length + ' archivos...');
   console.log('='.repeat(65) + '\n');
 
-  for (let i = 1; i <= 90; i++) {
-    const text = bingoFrases[i];
-    const outputPath = path.join(OUTPUT_DIR, i + '_var.mp3');
+  for (const task of tasks) {
+    const outputPath = path.join(OUTPUT_DIR, task.file);
     const exists = fs.existsSync(outputPath) ? '[REEMPLAZA]' : '[NUEVO]    ';
 
     try {
-      process.stdout.write(i + '. ' + exists + ' "' + text + '" ... ');
-      const size = await generateAudio(text, outputPath);
-      charsUsed += text.length;
+      process.stdout.write(task.num + ' ' + task.slot + '. ' + exists + ' "' + task.text + '" ... ');
+      const size = await generateAudio(task.text, outputPath);
+      charsUsed += task.text.length;
       success++;
       console.log('OK (' + size + ' bytes)');
-      // Pausa de 600ms entre peticiones para no saturar la API
       await sleep(600);
     } catch (err) {
       errors++;
+      failed.push(task.file);
       console.log('ERROR: ' + err.message);
     }
   }
 
-  // Verificar cuota final
   const finalQuota = await getRemainingQuota();
 
   console.log('\n' + '='.repeat(65));
   console.log('RESUMEN FINAL');
   console.log('='.repeat(65));
-  console.log('Archivos generados:    ' + success + '/90');
+  console.log('Archivos generados:    ' + success + '/' + tasks.length);
   console.log('Errores:               ' + errors);
+  if (failed.length > 0) console.log('Fallidos:              ' + failed.join(', '));
   console.log('Caracteres usados:     ~' + charsUsed);
-  console.log('Cuota usada sesion:    ~' + (initialQuota - finalQuota));
+  console.log('Cuota usada sesión:    ~' + (initialQuota - finalQuota));
   console.log('Cuota restante final:  ' + finalQuota + ' caracteres');
   console.log('Directorio:            ' + OUTPUT_DIR);
 
-  // Contar archivos _var.mp3 en el directorio
-  const allFiles = fs.readdirSync(OUTPUT_DIR).filter(f => f.endsWith('_var.mp3'));
-  console.log('\nArchivos _var.mp3 en numbers/: ' + allFiles.length);
+  const call1Files = fs.readdirSync(OUTPUT_DIR).filter(f => f.endsWith('_call1.mp3'));
+  const call2Files = fs.readdirSync(OUTPUT_DIR).filter(f => f.endsWith('_call2.mp3'));
+  console.log('\nArchivos _call1.mp3: ' + call1Files.length);
+  console.log('Archivos _call2.mp3: ' + call2Files.length);
   console.log('='.repeat(65) + '\n');
 
   if (errors > 0) {

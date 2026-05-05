@@ -5,31 +5,17 @@
  * MP3 de los números del bingo.
  *
  * Estructura de carpetas esperada en /public:
- *   /audio/numbers-male/     → voz masculina  (1.mp3, 1_var.mp3 … 90.mp3, 90_var.mp3)
- *   /audio/numbers-female/   → voz femenina   (1.mp3, 1_var.mp3 … 90.mp3, 90_var.mp3)
+ *   /audio/numbers-male/     → voz masculina  (1_call1.mp3, 1_call2.mp3 … 75_call1.mp3, 75_call2.mp3)
+ *   /audio/numbers-female/   → voz femenina   (1_call1.mp3, 1_call2.mp3 … 75_call1.mp3, 75_call2.mp3)
  *
  * ESTRATEGIA DE REPRODUCCIÓN:
  *   • Se usa Web Audio API (AudioContext + fetch + decodeAudioData) como
  *     mecanismo principal de reproducción.
- *   • A diferencia de HTMLAudioElement.play(), el AudioContext mantiene el
- *     permiso de reproducción activo después del primer gesto del usuario,
- *     lo que permite reproducir audio desde setInterval o código asíncrono
- *     en iOS Safari sin que el navegador rechace la reproducción.
+ *   • Cada número tiene dos frases (call1 / call2) que se alternan
+ *     aleatoriamente para que la cantada no sea monótona.
  *   • El AudioContext se desbloquea llamando desbloquearAudioContext() desde
  *     un handler de evento de usuario (tap/click).
  *   • Los AudioBuffer se cachean en memoria para evitar re-descargas.
- *   • Cada número tiene dos variantes: base (N.mp3) y variación (N_var.mp3).
- *     Se elige aleatoriamente cuál reproducir.
- *
- * CAMBIOS v4 (fix iOS Safari autoplay desde setInterval):
- *   • Reemplaza HTMLAudioElement por Web Audio API (AudioContext).
- *   • HTMLAudioElement.play() en iOS Safari solo funciona si se llama
- *     directamente desde un handler de gesto del usuario. Desde setInterval
- *     o .then() de una Promise, Safari rechaza play() con NotAllowedError.
- *   • AudioContext NO tiene esta restricción: una vez desbloqueado con el
- *     primer gesto, puede reproducir audio desde cualquier contexto asíncrono.
- *   • Se mantiene desbloquearAudioElement() como alias vacío para no romper
- *     imports existentes en Juego.tsx.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -41,8 +27,8 @@ const BASE_PATHS: Record<GeneroAudio, string> = {
   femenina:  '/audio/numbers-female',
 };
 
-/** Números disponibles (1–90) */
-const TOTAL_NUMEROS = 90;
+/** Números disponibles (1–75) */
+const TOTAL_NUMEROS = 75;
 
 // ─── Web Audio API ────────────────────────────────────────────────────────────
 
@@ -73,7 +59,7 @@ function obtenerAudioContext(): AudioContext | null {
 /**
  * Cache de URLs (registradas sin verificación de red).
  */
-const cacheURLs = new Map<GeneroAudio, Map<number, { base: string; variacion: string }>>();
+const cacheURLs = new Map<GeneroAudio, Map<number, { call1: string; call2: string }>>();
 
 /**
  * Cache de AudioBuffers decodificados.
@@ -95,10 +81,8 @@ const callbacksPendientes = new Map<GeneroAudio, Array<(cargados: number, total:
 // ─── Helpers internos ────────────────────────────────────────────────────────
 
 /** Construye la URL de un archivo de audio */
-function urlAudio(genero: GeneroAudio, numero: number, variacion: boolean): string {
-  const base = BASE_PATHS[genero];
-  const sufijo = variacion ? '_var' : '';
-  return `${base}/${numero}${sufijo}.mp3`;
+function urlAudio(genero: GeneroAudio, numero: number, slot: 'call1' | 'call2'): string {
+  return `${BASE_PATHS[genero]}/${numero}_${slot}.mp3`;
 }
 
 /**
@@ -145,7 +129,7 @@ export async function precargarGenero(
   genero: GeneroAudio,
   onProgreso?: (cargados: number, total: number) => void
 ): Promise<void> {
-  const total = TOTAL_NUMEROS * 2; // base + variación por número
+  const total = TOTAL_NUMEROS * 2; // call1 + call2 por número
 
   // ── Caso 1: precarga ya completó ────────────────────────────────────────
   if (precargaCompleta.has(genero)) {
@@ -174,7 +158,7 @@ export async function precargarGenero(
 
   let cargados = 0;
 
-  console.log(`[AudioService] Registrando URLs de voz ${genero} (${TOTAL_NUMEROS} números × 2 variantes)`);
+  console.log(`[AudioService] Registrando URLs de voz ${genero} (${TOTAL_NUMEROS} números × 2 frases)`);
 
   // Helper para notificar a TODOS los callbacks registrados
   const notificar = (c: number, t: number) => {
@@ -184,10 +168,10 @@ export async function precargarGenero(
 
   // Registrar URLs de forma síncrona — sin fetch, sin red.
   for (let n = 1; n <= TOTAL_NUMEROS; n++) {
-    const urlBase = urlAudio(genero, n, false);
-    const urlVar  = urlAudio(genero, n, true);
-
-    mapaGenero.set(n, { base: urlBase, variacion: urlVar });
+    mapaGenero.set(n, {
+      call1: urlAudio(genero, n, 'call1'),
+      call2: urlAudio(genero, n, 'call2'),
+    });
     cargados += 2;
     notificar(cargados, total);
 
@@ -243,18 +227,17 @@ export async function reproducirNumero(
     }
   }
 
-  // Elegir aleatoriamente base o variación (50/50)
-  const usarVariacion = Math.random() < 0.5;
+  // Elegir aleatoriamente call1 o call2 (50/50)
+  const slot: 'call1' | 'call2' = Math.random() < 0.5 ? 'call1' : 'call2';
 
   // Obtener URL del cache o construirla al vuelo
   const mapaGenero = cacheURLs.get(genero);
   let url: string;
 
   if (mapaGenero?.has(numero)) {
-    const entrada = mapaGenero.get(numero)!;
-    url = usarVariacion ? entrada.variacion : entrada.base;
+    url = mapaGenero.get(numero)![slot];
   } else {
-    url = urlAudio(genero, numero, usarVariacion);
+    url = urlAudio(genero, numero, slot);
     console.log(`[AudioService] Cache miss para ${genero}/${numero} — usando URL al vuelo`);
   }
 
@@ -351,8 +334,8 @@ export function limpiarCacheGenero(genero: GeneroAudio): void {
   const mapaGenero = cacheURLs.get(genero);
   if (mapaGenero) {
     for (const entrada of mapaGenero.values()) {
-      cacheBuffers.delete(entrada.base);
-      cacheBuffers.delete(entrada.variacion);
+      cacheBuffers.delete(entrada.call1);
+      cacheBuffers.delete(entrada.call2);
     }
   }
 

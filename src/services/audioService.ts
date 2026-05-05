@@ -105,7 +105,10 @@ async function obtenerBuffer(url: string): Promise<AudioBuffer | null> {
       return null;
     }
     const arrayBuffer = await response.arrayBuffer();
-    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+    // Callback API — compatible con TODAS las versiones de iOS Safari
+    const audioBuffer = await new Promise<AudioBuffer>((resolve, reject) => {
+      ctx.decodeAudioData(arrayBuffer, resolve, reject);
+    });
     cacheBuffers.set(url, audioBuffer);
     return audioBuffer;
   } catch (err) {
@@ -217,13 +220,12 @@ export async function reproducirNumero(
     sourceActivo = null;
   }
 
-  // Reanudar el AudioContext si está suspendido (iOS lo suspende en background)
-  if (ctx.state === 'suspended') {
+  // Reanudar el AudioContext si está suspendido (iOS/Android lo suspenden en background)
+  if (ctx.state !== 'running') {
     try {
       await ctx.resume();
     } catch {
-      console.warn('[AudioService] No se pudo reanudar el AudioContext');
-      return false;
+      console.warn('[AudioService] No se pudo reanudar el AudioContext — intentando reproducir igual');
     }
   }
 
@@ -284,12 +286,28 @@ export function desbloquearAudioContext(): void {
   const ctx = obtenerAudioContext();
   if (!ctx) return;
 
-  if (ctx.state === 'suspended') {
-    ctx.resume().then(() => {
+  // iOS Safari requiere reproducir un buffer real (aunque sea silencioso)
+  // desde el gesto del usuario para que el AudioContext quede verdaderamente
+  // desbloqueado. resume() solo no es suficiente en iOS.
+  const playSilent = () => {
+    try {
+      const buf = ctx.createBuffer(1, 1, 22050);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start(0);
       console.log('[AudioService] ✅ AudioContext desbloqueado');
-    }).catch((err) => {
+    } catch {
+      // ignorar — el contexto puede ya estar listo
+    }
+  };
+
+  if (ctx.state === 'suspended') {
+    ctx.resume().then(playSilent).catch((err) => {
       console.warn('[AudioService] No se pudo desbloquear AudioContext:', err);
     });
+  } else {
+    playSilent();
   }
 }
 

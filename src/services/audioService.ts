@@ -13,17 +13,20 @@
  *   /audio/numbers-bingo-alicia/  → voz Alicia                 (1.mp3 … 75.mp3)
  *
  * ESTRATEGIA DE REPRODUCCIÓN:
- *   • Se intenta Web Audio API (AudioContext + fetch + decodeAudioData) como
- *     mecanismo principal de reproducción.
- *   • Si decodeAudioData falla (p.ej. Safari/Edge con ciertos MP3 de ElevenLabs),
- *     se usa HTMLAudioElement como fallback automático.
- *   • Las voces tradicionales (masculina/femenina) tienen dos frases
- *     (call1 / call2) que se alternan aleatoriamente.
- *   • Las voces personalizadas (juan/harry/andrea/alicia) tienen un único
- *     archivo por número.
- *   • El AudioContext se desbloquea llamando desbloquearAudioContext() desde
- *     un handler de evento de usuario (tap/click).
- *   • Los AudioBuffer se cachean en memoria para evitar re-descargas.
+ *   1. Se descarga el MP3 como ArrayBuffer vía fetch().
+ *   2. Se intenta decodificar con Web Audio API (AudioContext + decodeAudioData).
+ *      Antes de decodificar se elimina el encabezado ID3v2 si está presente,
+ *      ya que ID3v2.4 (generado por ElevenLabs) no es compatible con Edge/iOS/Android.
+ *   3. Si decodeAudioData falla, se crea un Blob URL a partir del ArrayBuffer
+ *      y se reproduce con HTMLAudioElement. Los Blob URLs no requieren gesto
+ *      del usuario para reproducirse porque los datos ya están en memoria local.
+ *   4. Las voces tradicionales (masculina/femenina) tienen dos frases
+ *      (call1 / call2) que se alternan aleatoriamente.
+ *   5. Las voces personalizadas (juan/harry/andrea/alicia) tienen un único
+ *      archivo por número.
+ *   6. El AudioContext se desbloquea llamando desbloquearAudioContext() desde
+ *      un handler de evento de usuario (tap/click).
+ *   7. Los AudioBuffer y Blob URLs se cachean en memoria para evitar re-descargas.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -60,24 +63,8 @@ let sourceActivo: AudioBufferSourceNode | null = null;
 
 /**
  * HTMLAudioElement activo (fallback cuando decodeAudioData falla).
- * Se usa en Safari/Edge con ciertos MP3 de ElevenLabs que no pueden
- * ser decodificados por la Web Audio API.
  */
 let htmlAudioActivo: HTMLAudioElement | null = null;
-
-/**
- * Pool de HTMLAudioElements pre-creados y desbloqueados desde un gesto
- * del usuario. En iOS Safari, play() solo funciona si el elemento fue
- * "tocado" previamente desde un gesto directo.
- */
-const htmlAudioPool: HTMLAudioElement[] = [];
-
-/**
- * Conjunto de URLs que fallaron con decodeAudioData.
- * Para estas URLs se usa directamente HTMLAudioElement sin reintentar
- * la decodificación Web Audio.
- */
-const urlsConFallbackHTML = new Set<string>();
 
 /**
  * Obtiene (o crea) el AudioContext compartido.
@@ -108,10 +95,24 @@ const cacheURLsTradicional = new Map<GeneroAudio, Map<number, { call1: string; c
 const cacheURLsSimple = new Map<GeneroAudio, Map<number, string>>();
 
 /**
- * Cache de AudioBuffers decodificados.
+ * Cache de AudioBuffers decodificados (Web Audio API).
  * Clave: URL del archivo MP3.
  */
 const cacheBuffers = new Map<string, AudioBuffer>();
+
+/**
+ * Cache de Blob URLs para reproducción con HTMLAudioElement.
+ * Se usa cuando decodeAudioData falla (p.ej. ElevenLabs MP3 en Edge/iOS/Android).
+ * Los Blob URLs no requieren gesto del usuario para reproducirse.
+ * Clave: URL original del archivo MP3.
+ */
+const cacheBlobURLs = new Map<string, string>();
+
+/**
+ * Conjunto de URLs que fallaron con decodeAudioData.
+ * Para estas URLs se usa directamente Blob URL + HTMLAudioElement.
+ */
+const urlsConFallbackHTML = new Set<string>();
 
 /** Indica si la precarga de un género ya fue iniciada (evita doble ejecución) */
 const precargaIniciada = new Set<GeneroAudio>();
@@ -151,9 +152,6 @@ function urlAudioSimple(genero: GeneroAudio, numero: number): string {
  *   Byte  5   : flags
  *   Bytes 6-9 : tamaño del tag en formato syncsafe (7 bits por byte)
  *   Byte  10+ : frames del tag
- *
- * Después del tag puede haber un encabezado ID3v2 adicional (extended
- * header) o directamente los frames MP3 (0xFF 0xFB / 0xFF 0xFA / etc.).
  */
 function stripID3v2(buffer: ArrayBuffer): ArrayBuffer {
   const view = new Uint8Array(buffer);
@@ -182,12 +180,19 @@ function stripID3v2(buffer: ArrayBuffer): ArrayBuffer {
 }
 
 /**
- * Descarga y decodifica un MP3 como AudioBuffer.
- * Cachea el resultado para evitar re-descargas.
- * Retorna null si falla (en ese caso se usará HTMLAudioElement como fallback).
+ * Descarga el MP3 y lo prepara para reproducción.
+ *
+ * Estrategia:
+ *   1. Descarga el archivo como ArrayBuffer.
+ *   2. Intenta decodificar con Web Audio API (tras strip de ID3v2).
+ *   3. Si falla, crea un Blob URL y lo guarda en cacheBlobURLs.
+ *      Los Blob URLs se pueden reproducir con HTMLAudioElement desde
+ *      cualquier contexto (incluso timers) porque los datos son locales.
+ *
+ * Retorna el AudioBuffer si Web Audio funcionó, o null si se usará Blob URL.
  */
 async function obtenerBuffer(url: string): Promise<AudioBuffer | null> {
-  // Si esta URL ya falló antes con Web Audio, no reintentar
+  // Si esta URL ya falló antes con Web Audio, no reintentar decodeAudioData
   if (urlsConFallbackHTML.has(url)) return null;
 
   // Retornar del cache si ya está decodificado
@@ -206,36 +211,54 @@ async function obtenerBuffer(url: string): Promise<AudioBuffer | null> {
     }
     const rawBuffer = await response.arrayBuffer();
 
+    // Guardar una copia del rawBuffer para el Blob URL fallback ANTES de
+    // que decodeAudioData lo transfiera (detach). slice() crea una copia.
+    const rawBufferCopy = rawBuffer.slice(0);
+
     // Eliminar encabezado ID3v2 antes de decodificar.
     // ElevenLabs genera MP3 con ID3v2.4 que Edge/iOS Safari/Android
     // no pueden decodificar con decodeAudioData.
-    const arrayBuffer = stripID3v2(rawBuffer);
+    const strippedBuffer = stripID3v2(rawBuffer);
 
-    // Callback API — compatible con TODAS las versiones de iOS Safari
-    const audioBuffer = await new Promise<AudioBuffer>((resolve, reject) => {
-      ctx.decodeAudioData(arrayBuffer, resolve, reject);
-    });
-    cacheBuffers.set(url, audioBuffer);
-    return audioBuffer;
+    try {
+      // Callback API — compatible con TODAS las versiones de iOS Safari
+      const audioBuffer = await new Promise<AudioBuffer>((resolve, reject) => {
+        ctx.decodeAudioData(strippedBuffer, resolve, reject);
+      });
+      cacheBuffers.set(url, audioBuffer);
+      return audioBuffer;
+    } catch (decodeErr) {
+      // decodeAudioData falló — crear Blob URL para fallback con HTMLAudioElement.
+      // Los Blob URLs no requieren gesto del usuario para reproducirse porque
+      // los datos ya están en memoria local (no hay petición de red).
+      console.warn(`[AudioService] decodeAudioData falló para ${url} — creando Blob URL para fallback:`, decodeErr);
+      urlsConFallbackHTML.add(url);
+
+      if (!cacheBlobURLs.has(url)) {
+        const blob = new Blob([rawBufferCopy], { type: 'audio/mpeg' });
+        const blobUrl = URL.createObjectURL(blob);
+        cacheBlobURLs.set(url, blobUrl);
+        console.log(`[AudioService] Blob URL creado para ${url}`);
+      }
+
+      return null;
+    }
   } catch (err) {
-    // Marcar esta URL para usar HTMLAudioElement en el futuro
+    console.warn(`[AudioService] Error descargando ${url}:`, err);
     urlsConFallbackHTML.add(url);
-    console.warn(`[AudioService] decodeAudioData falló para ${url} — se usará HTMLAudioElement como fallback:`, err);
     return null;
   }
 }
 
 /**
- * Reproduce un MP3 usando HTMLAudioElement (fallback para Safari/Edge).
+ * Reproduce un MP3 usando HTMLAudioElement con Blob URL.
  *
- * IMPORTANTE: siempre se crea un elemento Audio() NUEVO para la reproducción.
- * Los elementos del pool se usaron con play() silencioso durante el unlock de
- * iOS (sin src), lo que los deja en estado NETWORK_NO_SOURCE. Reutilizarlos
- * para reproducción real causa el error "NotSupportedError: no supported source".
+ * Los Blob URLs son datos locales en memoria — no requieren gesto del usuario
+ * para reproducirse, a diferencia de URLs remotas en iOS/Android.
  *
  * Retorna true si la reproducción se inició correctamente.
  */
-async function reproducirConHTMLAudio(url: string): Promise<boolean> {
+async function reproducirConBlobURL(blobUrl: string, urlOriginal: string): Promise<boolean> {
   try {
     // Detener el HTMLAudio anterior si existe
     if (htmlAudioActivo) {
@@ -244,10 +267,8 @@ async function reproducirConHTMLAudio(url: string): Promise<boolean> {
       htmlAudioActivo = null;
     }
 
-    // Siempre crear un elemento nuevo — los del pool están en estado
-    // NETWORK_NO_SOURCE tras el play() silencioso del unlock de iOS.
     const audio = new Audio();
-    audio.src = url;
+    audio.src = blobUrl;
     audio.preload = 'auto';
     htmlAudioActivo = audio;
 
@@ -261,7 +282,7 @@ async function reproducirConHTMLAudio(url: string): Promise<boolean> {
 
     return true;
   } catch (err) {
-    console.warn(`[AudioService] HTMLAudioElement también falló para ${url}:`, err);
+    console.warn(`[AudioService] Blob URL también falló para ${urlOriginal}:`, err);
     return false;
   }
 }
@@ -363,8 +384,9 @@ export async function precargarGenero(
  * Reproduce el audio del número indicado para el género dado.
  *
  * Intenta primero con Web Audio API (AudioContext + decodeAudioData).
- * Si falla (p.ej. Safari/Edge con MP3 de ElevenLabs), usa HTMLAudioElement
- * como fallback automático.
+ * Si falla, usa Blob URL + HTMLAudioElement como fallback.
+ * Los Blob URLs funcionan desde timers (setInterval) en iOS/Android
+ * porque los datos ya están en memoria local.
  *
  * @returns Promise<boolean> — true = reproducción iniciada, false = falló
  */
@@ -418,35 +440,60 @@ export async function reproducirNumero(
     }
   }
 
-  // Obtener el AudioBuffer (del cache o descargando)
+  // Obtener el AudioBuffer (del cache o descargando + decodificando)
   const buffer = await obtenerBuffer(url);
-  if (!buffer) {
-    // Web Audio falló o no disponible — intentar con HTMLAudioElement
-    console.log(`[AudioService] Usando HTMLAudioElement para ${genero}/${numero} (${url})`);
-    return reproducirConHTMLAudio(url);
+
+  if (buffer) {
+    // ── Reproducir con Web Audio API ────────────────────────────────────
+    try {
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.start(0);
+      sourceActivo = source;
+
+      source.onended = () => {
+        if (sourceActivo === source) {
+          sourceActivo = null;
+        }
+      };
+
+      return true;
+    } catch (err) {
+      console.warn(`[AudioService] Error reproduciendo ${genero}/${numero} con Web Audio:`, err);
+      // Caer al fallback de Blob URL
+    }
   }
 
-  // Crear y conectar el nodo de reproducción
-  try {
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(ctx.destination);
-    source.start(0);
-    sourceActivo = source;
+  // ── Fallback: Blob URL + HTMLAudioElement ────────────────────────────────
+  // Si ya tenemos el Blob URL en cache, usarlo directamente.
+  // Si no, intentar descargar y crear el Blob URL ahora.
+  let blobUrl = cacheBlobURLs.get(url);
 
-    // Limpiar la referencia cuando termine
-    source.onended = () => {
-      if (sourceActivo === source) {
-        sourceActivo = null;
+  if (!blobUrl) {
+    // Intentar descargar y crear Blob URL
+    try {
+      const response = await fetch(url);
+      if (response.ok) {
+        const rawBuffer = await response.arrayBuffer();
+        const blob = new Blob([rawBuffer], { type: 'audio/mpeg' });
+        blobUrl = URL.createObjectURL(blob);
+        cacheBlobURLs.set(url, blobUrl);
+        urlsConFallbackHTML.add(url);
+        console.log(`[AudioService] Blob URL creado on-demand para ${genero}/${numero}`);
       }
-    };
-
-    return true;
-  } catch (err) {
-    console.warn(`[AudioService] Error reproduciendo ${genero}/${numero}:`, err);
-    // Último recurso: HTMLAudioElement
-    return reproducirConHTMLAudio(url);
+    } catch (fetchErr) {
+      console.warn(`[AudioService] No se pudo descargar ${url}:`, fetchErr);
+    }
   }
+
+  if (blobUrl) {
+    console.log(`[AudioService] Usando Blob URL para ${genero}/${numero}`);
+    return reproducirConBlobURL(blobUrl, url);
+  }
+
+  console.warn(`[AudioService] Sin audio disponible para ${genero}/${numero}`);
+  return false;
 }
 
 /**
@@ -483,26 +530,6 @@ export function desbloquearAudioContext(): void {
       .catch(err => console.warn('[AudioService] resume() falló:', err));
   } else {
     console.log('[AudioService] ✅ AudioContext desbloqueado');
-  }
-
-  // Pre-desbloquear HTMLAudioElements para el fallback en iOS Safari.
-  // En iOS, play() solo funciona si se llama sincrónicamente desde un gesto.
-  // Creamos y "tocamos" elementos silenciosos para que queden desbloqueados.
-  if (htmlAudioPool.length === 0) {
-    for (let i = 0; i < 3; i++) {
-      try {
-        const a = new Audio();
-        a.volume = 0;
-        // Intentar play() silencioso para desbloquear el elemento en iOS
-        a.play().catch(() => { /* silencioso */ });
-        a.pause();
-        a.volume = 1;
-        htmlAudioPool.push(a);
-      } catch {
-        // ignorar
-      }
-    }
-    console.log(`[AudioService] HTMLAudio pool inicializado (${htmlAudioPool.length} elementos)`);
   }
 }
 
@@ -553,21 +580,34 @@ export function limpiarCacheGenero(genero: GeneroAudio): void {
   detenerTodoAudio();
 
   if (esVozSimple(genero)) {
-    // Limpiar AudioBuffers cacheados de voces simples
+    // Limpiar AudioBuffers y Blob URLs cacheados de voces simples
     const mapa = cacheURLsSimple.get(genero);
     if (mapa) {
       for (const url of mapa.values()) {
         cacheBuffers.delete(url);
+        const blobUrl = cacheBlobURLs.get(url);
+        if (blobUrl) {
+          URL.revokeObjectURL(blobUrl);
+          cacheBlobURLs.delete(url);
+        }
+        urlsConFallbackHTML.delete(url);
       }
     }
     cacheURLsSimple.delete(genero);
   } else {
-    // Limpiar AudioBuffers cacheados de voces tradicionales
+    // Limpiar AudioBuffers y Blob URLs cacheados de voces tradicionales
     const mapa = cacheURLsTradicional.get(genero);
     if (mapa) {
       for (const entrada of mapa.values()) {
-        cacheBuffers.delete(entrada.call1);
-        cacheBuffers.delete(entrada.call2);
+        for (const url of [entrada.call1, entrada.call2]) {
+          cacheBuffers.delete(url);
+          const blobUrl = cacheBlobURLs.get(url);
+          if (blobUrl) {
+            URL.revokeObjectURL(blobUrl);
+            cacheBlobURLs.delete(url);
+          }
+          urlsConFallbackHTML.delete(url);
+        }
       }
     }
     cacheURLsTradicional.delete(genero);

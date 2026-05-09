@@ -137,6 +137,51 @@ function urlAudioSimple(genero: GeneroAudio, numero: number): string {
 }
 
 /**
+ * Elimina el encabezado ID3v2 de un ArrayBuffer si está presente.
+ *
+ * ElevenLabs genera MP3 con etiquetas ID3v2.4 (versión 4), que Edge,
+ * iOS Safari y Android no pueden decodificar con decodeAudioData.
+ * Al eliminar el encabezado ID3 se exponen directamente los frames MP3
+ * que todos los navegadores saben decodificar.
+ *
+ * Estructura del encabezado ID3v2:
+ *   Bytes 0-2 : "ID3" (0x49 0x44 0x33)
+ *   Byte  3   : versión mayor (0x04 = v2.4, 0x03 = v2.3, etc.)
+ *   Byte  4   : revisión
+ *   Byte  5   : flags
+ *   Bytes 6-9 : tamaño del tag en formato syncsafe (7 bits por byte)
+ *   Byte  10+ : frames del tag
+ *
+ * Después del tag puede haber un encabezado ID3v2 adicional (extended
+ * header) o directamente los frames MP3 (0xFF 0xFB / 0xFF 0xFA / etc.).
+ */
+function stripID3v2(buffer: ArrayBuffer): ArrayBuffer {
+  const view = new Uint8Array(buffer);
+
+  // Verificar firma "ID3"
+  if (view.length < 10 || view[0] !== 0x49 || view[1] !== 0x44 || view[2] !== 0x33) {
+    return buffer; // No tiene encabezado ID3v2 — devolver tal cual
+  }
+
+  // Leer el tamaño del tag en formato syncsafe (4 bytes × 7 bits)
+  const tagSize =
+    ((view[6] & 0x7F) << 21) |
+    ((view[7] & 0x7F) << 14) |
+    ((view[8] & 0x7F) <<  7) |
+     (view[9] & 0x7F);
+
+  // El encabezado ID3v2 ocupa 10 bytes + tagSize bytes
+  const offset = 10 + tagSize;
+
+  if (offset >= view.length) {
+    return buffer; // Offset inválido — devolver original para no romper nada
+  }
+
+  // Devolver el buffer sin el encabezado ID3v2
+  return buffer.slice(offset);
+}
+
+/**
  * Descarga y decodifica un MP3 como AudioBuffer.
  * Cachea el resultado para evitar re-descargas.
  * Retorna null si falla (en ese caso se usará HTMLAudioElement como fallback).
@@ -159,7 +204,13 @@ async function obtenerBuffer(url: string): Promise<AudioBuffer | null> {
       console.warn(`[AudioService] HTTP ${response.status} para ${url}`);
       return null;
     }
-    const arrayBuffer = await response.arrayBuffer();
+    const rawBuffer = await response.arrayBuffer();
+
+    // Eliminar encabezado ID3v2 antes de decodificar.
+    // ElevenLabs genera MP3 con ID3v2.4 que Edge/iOS Safari/Android
+    // no pueden decodificar con decodeAudioData.
+    const arrayBuffer = stripID3v2(rawBuffer);
+
     // Callback API — compatible con TODAS las versiones de iOS Safari
     const audioBuffer = await new Promise<AudioBuffer>((resolve, reject) => {
       ctx.decodeAudioData(arrayBuffer, resolve, reject);
@@ -176,7 +227,12 @@ async function obtenerBuffer(url: string): Promise<AudioBuffer | null> {
 
 /**
  * Reproduce un MP3 usando HTMLAudioElement (fallback para Safari/Edge).
- * Usa el pool de elementos pre-desbloqueados si está disponible (iOS Safari).
+ *
+ * IMPORTANTE: siempre se crea un elemento Audio() NUEVO para la reproducción.
+ * Los elementos del pool se usaron con play() silencioso durante el unlock de
+ * iOS (sin src), lo que los deja en estado NETWORK_NO_SOURCE. Reutilizarlos
+ * para reproducción real causa el error "NotSupportedError: no supported source".
+ *
  * Retorna true si la reproducción se inició correctamente.
  */
 async function reproducirConHTMLAudio(url: string): Promise<boolean> {
@@ -188,11 +244,9 @@ async function reproducirConHTMLAudio(url: string): Promise<boolean> {
       htmlAudioActivo = null;
     }
 
-    // Usar un elemento del pool (pre-desbloqueado en iOS) o crear uno nuevo
-    const audio = htmlAudioPool.length > 0
-      ? htmlAudioPool[0]   // reutilizar el mismo elemento del pool
-      : new Audio();
-
+    // Siempre crear un elemento nuevo — los del pool están en estado
+    // NETWORK_NO_SOURCE tras el play() silencioso del unlock de iOS.
+    const audio = new Audio();
     audio.src = url;
     audio.preload = 'auto';
     htmlAudioActivo = audio;

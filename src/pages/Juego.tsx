@@ -8,7 +8,7 @@ import {
   hablarNumeroConAudio,
   detenerKeepAliveIOS,
 } from '../utils/bingo';
-import { precargarGenero, desbloquearAudioContext, limpiarCacheGenero } from '../services/audioService';
+import { precargarGenero, desbloquearAudioContext, limpiarCacheGenero, vozTieneCoberturaTotalMP3, obtenerRangoVoz } from '../services/audioService';
 import type { GeneroAudio } from '../services/audioService';
 import { detenerTodoAudio } from '../utils/bingo';
 import { firebaseService } from '../services/firebase';
@@ -208,6 +208,8 @@ export default function Juego() {
   const llamada = bolaActual ? obtenerLlamadaBola(bolaActual) : null;
   const progresoJuego = (bolasExtraidas.length / evento.numBolas) * 100;
   const audioPreparado = progresoCarga >= 100;
+  const vozConCoberturaTotal = vozTieneCoberturaTotalMP3(config.voz as GeneroAudio);
+  const rangoVoz = obtenerRangoVoz(config.voz as GeneroAudio);
 
   return (
     <div className="min-h-screen w-full relative overflow-hidden">
@@ -251,9 +253,14 @@ export default function Juego() {
                 🎵 Cargando audio {config.voz}… {progresoCarga}%
               </p>
             )}
-            {config.sonido && audioPreparado && (
+            {config.sonido && audioPreparado && vozConCoberturaTotal && (
               <p className="text-xs text-green-200 opacity-80 mt-0.5">
                 🎵 Audio {config.voz} listo
+              </p>
+            )}
+            {config.sonido && audioPreparado && !vozConCoberturaTotal && (
+              <p className="text-xs text-orange-200 opacity-90 mt-0.5">
+                🎵 Audio {config.voz}: {rangoVoz.min}–{rangoVoz.max} MP3 · {rangoVoz.max + 1}–75 voz TTS
               </p>
             )}
           </div>

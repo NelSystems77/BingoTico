@@ -4,13 +4,13 @@
  * Servicio de audio con carga bajo demanda (lazy loading) para los archivos
  * MP3 de los números del bingo.
  *
- * Estructura de carpetas esperada en /public:
- *   /audio/numbers-male/          → voz masculina tradicional  (1_call1.mp3, 1_call2.mp3 … 75_call2.mp3)
- *   /audio/numbers-female/        → voz femenina tradicional   (1_call1.mp3, 1_call2.mp3 … 75_call2.mp3)
- *   /audio/numbers-bingo-juan/    → voz Juan                   (1.mp3 … 75.mp3)
- *   /audio/numbers-bingo-harry/   → voz Harry                  (1.mp3 … 75.mp3)
- *   /audio/numbers-bingo-andrea/  → voz Andrea                 (1.mp3 … 75.mp3)
- *   /audio/numbers-bingo-alicia/  → voz Alicia                 (1.mp3 … 75.mp3)
+ * Estructura de carpetas en /public/audio:
+ *   numbers-male/          → voz masculina tradicional  (1_call1.mp3 … 75_call2.mp3)
+ *   numbers-female/        → voz femenina tradicional   (1_call1.mp3 … 48_call2.mp3)
+ *   numbers-bingo-juan/    → voz Juan                   (1.mp3 … 75.mp3)
+ *   numbers-bingo-harry/   → voz Harry                  (1.mp3 … 75.mp3)
+ *   numbers-bingo-andrea/  → voz Andrea                 (1.mp3 … 75.mp3)
+ *   numbers-bingo-alicia/  → voz Alicia                 (1.mp3 … 75.mp3)
  *
  * ESTRATEGIA DE REPRODUCCIÓN (en orden de prioridad):
  *   1. Web Audio API (AudioContext + decodeAudioData) con buffer ID3-stripped.
@@ -22,8 +22,8 @@
  *      IMPORTANTE: el Blob se crea desde el buffer SIN encabezado ID3v2.4,
  *      ya que Edge/iOS/Android no pueden reproducir MP3 con ID3v2.4 via
  *      HTMLAudioElement tampoco.
- *   3. HTMLAudioElement con src directo (URL remota).
- *      Último recurso — puede fallar en iOS/Android sin gesto activo.
+ *   3. TTS (Web Speech API) como último recurso — garantiza audio en todos
+ *      los dispositivos aunque no haya archivo MP3 disponible.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -40,6 +40,23 @@ const BASE_PATHS: Record<GeneroAudio, string> = {
 };
 
 /**
+ * Rango real de números disponibles para cada voz.
+ * Si un número está fuera del rango, reproducirNumero() devuelve false
+ * y el caller (hablarNumeroConAudio) usa TTS como fallback.
+ *
+ * numbers-female solo tiene archivos 1–48; el resto cae a TTS.
+ * Todas las demás voces tienen 1–75.
+ */
+const RANGO_NUMEROS: Record<GeneroAudio, { min: number; max: number }> = {
+  masculina: { min: 1, max: 75 },
+  femenina:  { min: 1, max: 48 },   // solo 1–48 disponibles en disco
+  juan:      { min: 1, max: 75 },
+  harry:     { min: 1, max: 75 },
+  andrea:    { min: 1, max: 75 },
+  alicia:    { min: 1, max: 75 },
+};
+
+/**
  * Indica si una voz usa el formato de archivo único por número (N.mp3)
  * en lugar del formato con variantes (N_call1.mp3 / N_call2.mp3).
  */
@@ -47,8 +64,16 @@ function esVozSimple(genero: GeneroAudio): boolean {
   return genero === 'juan' || genero === 'harry' || genero === 'andrea' || genero === 'alicia';
 }
 
-/** Números disponibles (1–75) */
-const TOTAL_NUMEROS = 75;
+/**
+ * Devuelve true si el número tiene archivo MP3 disponible para la voz dada.
+ */
+function numeroDisponible(genero: GeneroAudio, numero: number): boolean {
+  const { min, max } = RANGO_NUMEROS[genero];
+  return numero >= min && numero <= max;
+}
+
+/** Número máximo del bingo (rango global) */
+const BINGO_MAX = 75;
 
 // ─── Web Audio API ────────────────────────────────────────────────────────────
 
@@ -297,7 +322,9 @@ async function reproducirConBlobURL(blobUrl: string, urlOriginal: string): Promi
 // ─── API pública ─────────────────────────────────────────────────────────────
 
 /**
- * Registra en el cache las URLs de todos los archivos MP3 del género indicado.
+ * Registra en el cache las URLs de los archivos MP3 disponibles para el género.
+ * Solo registra los números dentro del rango real (RANGO_NUMEROS) — los números
+ * fuera del rango se manejan con TTS en tiempo de reproducción.
  * NO realiza ninguna petición de red — las URLs son estáticas y conocidas.
  * El progreso se reporta de forma síncrona para que la barra de carga avance
  * correctamente en todos los navegadores.
@@ -310,8 +337,11 @@ export async function precargarGenero(
   onProgreso?: (cargados: number, total: number) => void
 ): Promise<void> {
   const simple = esVozSimple(genero);
-  // Voces simples: 1 archivo por número; tradicionales: 2 (call1 + call2)
-  const total = simple ? TOTAL_NUMEROS : TOTAL_NUMEROS * 2;
+  const { min, max } = RANGO_NUMEROS[genero];
+  const numerosDisponibles = max - min + 1;
+
+  // Total de entradas de cache: voces simples = 1 por número; tradicionales = 2 (call1+call2)
+  const total = simple ? numerosDisponibles : numerosDisponibles * 2;
 
   // ── Caso 1: precarga ya completó ────────────────────────────────────────
   if (precargaCompleta.has(genero)) {
@@ -335,7 +365,10 @@ export async function precargarGenero(
 
   let cargados = 0;
 
-  console.log(`[AudioService] Registrando URLs de voz "${genero}" (${TOTAL_NUMEROS} números${simple ? '' : ' × 2 frases'})`);
+  console.log(
+    `[AudioService] Registrando URLs de voz "${genero}" ` +
+    `(números ${min}–${max}${simple ? '' : ' × 2 frases'})`
+  );
 
   // Helper para notificar a TODOS los callbacks registrados
   const notificar = (c: number, t: number) => {
@@ -350,7 +383,7 @@ export async function precargarGenero(
     }
     const mapa = cacheURLsSimple.get(genero)!;
 
-    for (let n = 1; n <= TOTAL_NUMEROS; n++) {
+    for (let n = min; n <= max; n++) {
       mapa.set(n, urlAudioSimple(genero, n));
       cargados += 1;
       notificar(cargados, total);
@@ -367,7 +400,7 @@ export async function precargarGenero(
     }
     const mapa = cacheURLsTradicional.get(genero)!;
 
-    for (let n = 1; n <= TOTAL_NUMEROS; n++) {
+    for (let n = min; n <= max; n++) {
       mapa.set(n, {
         call1: urlAudioTradicional(genero, n, 'call1'),
         call2: urlAudioTradicional(genero, n, 'call2'),
@@ -384,23 +417,37 @@ export async function precargarGenero(
 
   precargaCompleta.add(genero);
   callbacksPendientes.delete(genero);
-  console.log(`[AudioService] ✅ URLs registradas: voz "${genero}"`);
+  console.log(`[AudioService] ✅ URLs registradas: voz "${genero}" (${numerosDisponibles} números)`);
 }
 
 /**
  * Reproduce el audio del número indicado para el género dado.
  *
  * Estrategia en orden de prioridad:
- *   1. Web Audio API (AudioContext + decodeAudioData con buffer stripped).
- *   2. HTMLAudioElement con Blob URL creado desde buffer stripped (sin ID3v2.4).
- *   3. HTMLAudioElement con src directo (URL remota) — último recurso.
+ *   1. Verificar que el número tiene MP3 disponible para esta voz (RANGO_NUMEROS).
+ *      Si no, devuelve false inmediatamente → el caller usa TTS como fallback.
+ *   2. Web Audio API (AudioContext + decodeAudioData con buffer stripped).
+ *      Funciona en iOS Safari, Android Chrome y todos los navegadores de escritorio.
+ *   3. HTMLAudioElement con Blob URL creado desde buffer stripped (sin ID3v2.4).
+ *      Fallback para cuando decodeAudioData falla (Edge antiguo, algunos Android).
  *
- * @returns Promise<boolean> — true = reproducción iniciada, false = falló
+ * @returns Promise<boolean> — true = reproducción iniciada, false = no disponible o falló
  */
 export async function reproducirNumero(
   numero: number,
   genero: GeneroAudio
 ): Promise<boolean> {
+  // ── Verificar disponibilidad del archivo MP3 para esta voz ───────────────
+  // Si el número está fuera del rango disponible, devolver false de inmediato
+  // para que hablarNumeroConAudio() use TTS como fallback sin intentar fetch.
+  if (!numeroDisponible(genero, numero)) {
+    console.info(
+      `[AudioService] ${genero}/${numero} fuera del rango disponible ` +
+      `(${RANGO_NUMEROS[genero].min}–${RANGO_NUMEROS[genero].max}) — usando TTS`
+    );
+    return false;
+  }
+
   const ctx = obtenerAudioContext();
 
   // Detener audio anterior si existe
@@ -641,4 +688,21 @@ export function esPrecargaCompleta(genero: GeneroAudio): boolean {
  */
 export function esPrecargaIniciada(genero: GeneroAudio): boolean {
   return precargaIniciada.has(genero);
+}
+
+/**
+ * Devuelve el rango de números con MP3 disponibles para la voz dada.
+ * Útil para mostrar en la UI si una voz tiene cobertura parcial.
+ */
+export function obtenerRangoVoz(genero: GeneroAudio): { min: number; max: number } {
+  return RANGO_NUMEROS[genero];
+}
+
+/**
+ * Devuelve true si la voz tiene MP3 para todos los números del bingo (1–75).
+ * false = cobertura parcial (algunos números usarán TTS como fallback).
+ */
+export function vozTieneCoberturaTotalMP3(genero: GeneroAudio): boolean {
+  const { min, max } = RANGO_NUMEROS[genero];
+  return min === 1 && max >= BINGO_MAX;
 }

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useConfigStore } from '../stores/configStore';
 import type { GeneroAudio } from '../services/audioService';
+import { vozTieneCoberturaTotalMP3, obtenerRangoVoz } from '../services/audioService';
 
 export default function Configuracion() {
   const navigate = useNavigate();
@@ -174,6 +175,21 @@ export default function Configuracion() {
                   </button>
                 ))}
               </div>
+
+              {/* Nota de cobertura parcial para la voz seleccionada */}
+              {!vozTieneCoberturaTotalMP3(localConfig.voz as GeneroAudio) && (
+                <div className="mt-2 px-2 py-1.5 rounded-md text-xs" style={{
+                  background: 'rgba(255,193,7,0.18)',
+                  border: '1px solid rgba(255,193,7,0.45)',
+                  color: '#7a5800',
+                }}>
+                  ⚠️ Voz <strong>{localConfig.voz}</strong>: MP3 disponibles para los números{' '}
+                  {obtenerRangoVoz(localConfig.voz as GeneroAudio).min}–
+                  {obtenerRangoVoz(localConfig.voz as GeneroAudio).max}.
+                  Los números {obtenerRangoVoz(localConfig.voz as GeneroAudio).max + 1}–75
+                  usarán voz TTS del dispositivo automáticamente.
+                </div>
+              )}
             </div>
 
             {/* Extracción */}

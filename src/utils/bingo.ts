@@ -3,6 +3,16 @@ import type { LlamadaBola } from '../types';
 import { reproducirNumero, detenerTodoAudio } from '../services/audioService';
 import type { GeneroAudio } from '../services/audioService';
 
+/** Etiquetas de visualización para cada tipo de voz */
+export const ETIQUETAS_VOZ: Record<GeneroAudio, string> = {
+  masculina: '🎙️ Tradicional Masculino',
+  femenina:  '🎙️ Tradicional Femenino',
+  juan:      '🎤 Juan',
+  harry:     '🎤 Harry',
+  andrea:    '🎤 Andrea',
+  alicia:    '🎤 Alicia',
+};
+
 // Re-exportar detenerTodoAudio para que Juego.tsx lo siga importando desde aquí si lo necesita
 export { detenerTodoAudio };
 

@@ -5,27 +5,45 @@
  * MP3 de los números del bingo.
  *
  * Estructura de carpetas esperada en /public:
- *   /audio/numbers-male/     → voz masculina  (1_call1.mp3, 1_call2.mp3 … 75_call1.mp3, 75_call2.mp3)
- *   /audio/numbers-female/   → voz femenina   (1_call1.mp3, 1_call2.mp3 … 75_call1.mp3, 75_call2.mp3)
+ *   /audio/numbers-male/          → voz masculina tradicional  (1_call1.mp3, 1_call2.mp3 … 75_call2.mp3)
+ *   /audio/numbers-female/        → voz femenina tradicional   (1_call1.mp3, 1_call2.mp3 … 75_call2.mp3)
+ *   /audio/numbers-bingo-juan/    → voz Juan                   (1.mp3 … 75.mp3)
+ *   /audio/numbers-bingo-harry/   → voz Harry                  (1.mp3 … 75.mp3)
+ *   /audio/numbers-bingo-andrea/  → voz Andrea                 (1.mp3 … 75.mp3)
+ *   /audio/numbers-bingo-alicia/  → voz Alicia                 (1.mp3 … 75.mp3)
  *
  * ESTRATEGIA DE REPRODUCCIÓN:
  *   • Se usa Web Audio API (AudioContext + fetch + decodeAudioData) como
  *     mecanismo principal de reproducción.
- *   • Cada número tiene dos frases (call1 / call2) que se alternan
- *     aleatoriamente para que la cantada no sea monótona.
+ *   • Las voces tradicionales (masculina/femenina) tienen dos frases
+ *     (call1 / call2) que se alternan aleatoriamente.
+ *   • Las voces personalizadas (juan/harry/andrea/alicia) tienen un único
+ *     archivo por número.
  *   • El AudioContext se desbloquea llamando desbloquearAudioContext() desde
  *     un handler de evento de usuario (tap/click).
  *   • Los AudioBuffer se cachean en memoria para evitar re-descargas.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-export type GeneroAudio = 'masculina' | 'femenina';
+export type GeneroAudio = 'masculina' | 'femenina' | 'juan' | 'harry' | 'andrea' | 'alicia';
 
-/** Rutas base de los dos conjuntos de audio */
+/** Rutas base de todos los conjuntos de audio */
 const BASE_PATHS: Record<GeneroAudio, string> = {
   masculina: '/audio/numbers-male',
   femenina:  '/audio/numbers-female',
+  juan:      '/audio/numbers-bingo-juan',
+  harry:     '/audio/numbers-bingo-harry',
+  andrea:    '/audio/numbers-bingo-andrea',
+  alicia:    '/audio/numbers-bingo-alicia',
 };
+
+/**
+ * Indica si una voz usa el formato de archivo único por número (N.mp3)
+ * en lugar del formato con variantes (N_call1.mp3 / N_call2.mp3).
+ */
+function esVozSimple(genero: GeneroAudio): boolean {
+  return genero === 'juan' || genero === 'harry' || genero === 'andrea' || genero === 'alicia';
+}
 
 /** Números disponibles (1–75) */
 const TOTAL_NUMEROS = 75;
@@ -57,9 +75,14 @@ function obtenerAudioContext(): AudioContext | null {
 // ─── Cache de URLs y AudioBuffers ────────────────────────────────────────────
 
 /**
- * Cache de URLs (registradas sin verificación de red).
+ * Cache de URLs para voces tradicionales (call1/call2).
  */
-const cacheURLs = new Map<GeneroAudio, Map<number, { call1: string; call2: string }>>();
+const cacheURLsTradicional = new Map<GeneroAudio, Map<number, { call1: string; call2: string }>>();
+
+/**
+ * Cache de URLs para voces simples (un solo archivo por número).
+ */
+const cacheURLsSimple = new Map<GeneroAudio, Map<number, string>>();
 
 /**
  * Cache de AudioBuffers decodificados.
@@ -80,9 +103,14 @@ const callbacksPendientes = new Map<GeneroAudio, Array<(cargados: number, total:
 
 // ─── Helpers internos ────────────────────────────────────────────────────────
 
-/** Construye la URL de un archivo de audio */
-function urlAudio(genero: GeneroAudio, numero: number, slot: 'call1' | 'call2'): string {
+/** Construye la URL de un archivo de audio para voces tradicionales */
+function urlAudioTradicional(genero: GeneroAudio, numero: number, slot: 'call1' | 'call2'): string {
   return `${BASE_PATHS[genero]}/${numero}_${slot}.mp3`;
+}
+
+/** Construye la URL de un archivo de audio para voces simples */
+function urlAudioSimple(genero: GeneroAudio, numero: number): string {
+  return `${BASE_PATHS[genero]}/${numero}.mp3`;
 }
 
 /**
@@ -125,14 +153,16 @@ async function obtenerBuffer(url: string): Promise<AudioBuffer | null> {
  * El progreso se reporta de forma síncrona para que la barra de carga avance
  * correctamente en todos los navegadores.
  *
- * @param genero      'masculina' | 'femenina'
+ * @param genero      Tipo de voz
  * @param onProgreso  Callback opcional (cargados, total) para UI de progreso
  */
 export async function precargarGenero(
   genero: GeneroAudio,
   onProgreso?: (cargados: number, total: number) => void
 ): Promise<void> {
-  const total = TOTAL_NUMEROS * 2; // call1 + call2 por número
+  const simple = esVozSimple(genero);
+  // Voces simples: 1 archivo por número; tradicionales: 2 (call1 + call2)
+  const total = simple ? TOTAL_NUMEROS : TOTAL_NUMEROS * 2;
 
   // ── Caso 1: precarga ya completó ────────────────────────────────────────
   if (precargaCompleta.has(genero)) {
@@ -154,14 +184,9 @@ export async function precargarGenero(
   // ── Caso 3: primera vez — iniciar precarga ───────────────────────────────
   precargaIniciada.add(genero);
 
-  if (!cacheURLs.has(genero)) {
-    cacheURLs.set(genero, new Map());
-  }
-  const mapaGenero = cacheURLs.get(genero)!;
-
   let cargados = 0;
 
-  console.log(`[AudioService] Registrando URLs de voz ${genero} (${TOTAL_NUMEROS} números × 2 frases)`);
+  console.log(`[AudioService] Registrando URLs de voz "${genero}" (${TOTAL_NUMEROS} números${simple ? '' : ' × 2 frases'})`);
 
   // Helper para notificar a TODOS los callbacks registrados
   const notificar = (c: number, t: number) => {
@@ -169,24 +194,48 @@ export async function precargarGenero(
     callbacksPendientes.get(genero)?.forEach(cb => cb(c, t));
   };
 
-  // Registrar URLs de forma síncrona — sin fetch, sin red.
-  for (let n = 1; n <= TOTAL_NUMEROS; n++) {
-    mapaGenero.set(n, {
-      call1: urlAudio(genero, n, 'call1'),
-      call2: urlAudio(genero, n, 'call2'),
-    });
-    cargados += 2;
-    notificar(cargados, total);
+  if (simple) {
+    // ── Voces simples: un archivo por número ────────────────────────────
+    if (!cacheURLsSimple.has(genero)) {
+      cacheURLsSimple.set(genero, new Map());
+    }
+    const mapa = cacheURLsSimple.get(genero)!;
 
-    // Ceder el hilo cada 10 números para no bloquear el render de React
-    if (n % 10 === 0) {
-      await new Promise<void>(resolve => setTimeout(resolve, 0));
+    for (let n = 1; n <= TOTAL_NUMEROS; n++) {
+      mapa.set(n, urlAudioSimple(genero, n));
+      cargados += 1;
+      notificar(cargados, total);
+
+      // Ceder el hilo cada 10 números para no bloquear el render de React
+      if (n % 10 === 0) {
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+      }
+    }
+  } else {
+    // ── Voces tradicionales: call1 + call2 por número ───────────────────
+    if (!cacheURLsTradicional.has(genero)) {
+      cacheURLsTradicional.set(genero, new Map());
+    }
+    const mapa = cacheURLsTradicional.get(genero)!;
+
+    for (let n = 1; n <= TOTAL_NUMEROS; n++) {
+      mapa.set(n, {
+        call1: urlAudioTradicional(genero, n, 'call1'),
+        call2: urlAudioTradicional(genero, n, 'call2'),
+      });
+      cargados += 2;
+      notificar(cargados, total);
+
+      // Ceder el hilo cada 10 números para no bloquear el render de React
+      if (n % 10 === 0) {
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+      }
     }
   }
 
   precargaCompleta.add(genero);
   callbacksPendientes.delete(genero);
-  console.log(`[AudioService] ✅ URLs registradas: voz ${genero}`);
+  console.log(`[AudioService] ✅ URLs registradas: voz "${genero}"`);
 }
 
 /**
@@ -229,18 +278,27 @@ export async function reproducirNumero(
     }
   }
 
-  // Elegir aleatoriamente call1 o call2 (50/50)
-  const slot: 'call1' | 'call2' = Math.random() < 0.5 ? 'call1' : 'call2';
-
-  // Obtener URL del cache o construirla al vuelo
-  const mapaGenero = cacheURLs.get(genero);
   let url: string;
 
-  if (mapaGenero?.has(numero)) {
-    url = mapaGenero.get(numero)![slot];
+  if (esVozSimple(genero)) {
+    // ── Voces simples: un único archivo por número ───────────────────────
+    const mapa = cacheURLsSimple.get(genero);
+    if (mapa?.has(numero)) {
+      url = mapa.get(numero)!;
+    } else {
+      url = urlAudioSimple(genero, numero);
+      console.log(`[AudioService] Cache miss para ${genero}/${numero} — usando URL al vuelo`);
+    }
   } else {
-    url = urlAudio(genero, numero, slot);
-    console.log(`[AudioService] Cache miss para ${genero}/${numero} — usando URL al vuelo`);
+    // ── Voces tradicionales: elegir aleatoriamente call1 o call2 (50/50) ─
+    const slot: 'call1' | 'call2' = Math.random() < 0.5 ? 'call1' : 'call2';
+    const mapa = cacheURLsTradicional.get(genero);
+    if (mapa?.has(numero)) {
+      url = mapa.get(numero)![slot];
+    } else {
+      url = urlAudioTradicional(genero, numero, slot);
+      console.log(`[AudioService] Cache miss para ${genero}/${numero} — usando URL al vuelo`);
+    }
   }
 
   // Obtener el AudioBuffer (del cache o descargando)
@@ -346,20 +404,31 @@ export function detenerAudio(_genero: GeneroAudio): void {
 export function limpiarCacheGenero(genero: GeneroAudio): void {
   detenerTodoAudio();
 
-  // Limpiar también los AudioBuffers cacheados de este género
-  const mapaGenero = cacheURLs.get(genero);
-  if (mapaGenero) {
-    for (const entrada of mapaGenero.values()) {
-      cacheBuffers.delete(entrada.call1);
-      cacheBuffers.delete(entrada.call2);
+  if (esVozSimple(genero)) {
+    // Limpiar AudioBuffers cacheados de voces simples
+    const mapa = cacheURLsSimple.get(genero);
+    if (mapa) {
+      for (const url of mapa.values()) {
+        cacheBuffers.delete(url);
+      }
     }
+    cacheURLsSimple.delete(genero);
+  } else {
+    // Limpiar AudioBuffers cacheados de voces tradicionales
+    const mapa = cacheURLsTradicional.get(genero);
+    if (mapa) {
+      for (const entrada of mapa.values()) {
+        cacheBuffers.delete(entrada.call1);
+        cacheBuffers.delete(entrada.call2);
+      }
+    }
+    cacheURLsTradicional.delete(genero);
   }
 
-  cacheURLs.delete(genero);
   precargaIniciada.delete(genero);
   precargaCompleta.delete(genero);
   callbacksPendientes.delete(genero);
-  console.log(`[AudioService] Cache liberado para voz ${genero}`);
+  console.log(`[AudioService] Cache liberado para voz "${genero}"`);
 }
 
 /**

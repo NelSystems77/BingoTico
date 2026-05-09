@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useConfigStore } from '../stores/configStore';
+import type { GeneroAudio } from '../services/audioService';
 
 export default function Configuracion() {
   const navigate = useNavigate();
@@ -116,30 +117,62 @@ export default function Configuracion() {
               backdropFilter: 'blur(10px)',
               border: '1px solid rgba(255, 255, 255, 0.3)',
             }}>
-              <label className="text-sm font-bold text-gray-900 block mb-2">🎤 Voz</label>
+              <label className="text-sm font-bold text-gray-900 block mb-2">🎤 Voz del Cantado</label>
+
+              {/* Grupo: Cantado Tradicional */}
+              <p className="text-xs font-semibold text-gray-700 mb-1 mt-1">Cantado Tradicional</p>
+              <div className="grid grid-cols-2 gap-2 mb-3">
+                {(
+                  [
+                    { key: 'masculina' as GeneroAudio, label: '👨 Masculino', color: 'rgba(0,102,204,0.9)' },
+                    { key: 'femenina'  as GeneroAudio, label: '👩 Femenino',  color: 'rgba(196,30,58,0.9)' },
+                  ] as { key: GeneroAudio; label: string; color: string }[]
+                ).map(({ key, label, color }) => (
+                  <button
+                    key={key}
+                    onClick={() => updateLocal('voz', key)}
+                    className="py-2 rounded-md text-xs font-bold transition-all"
+                    style={{
+                      background: localConfig.voz === key ? color : 'rgba(255,255,255,0.5)',
+                      color: localConfig.voz === key ? 'white' : '#2D2D2D',
+                      border: localConfig.voz === key
+                        ? `2px solid ${color}`
+                        : '1px solid rgba(255,255,255,0.4)',
+                      boxShadow: localConfig.voz === key ? `0 3px 10px ${color}` : 'none',
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Grupo: Voces Personalizadas */}
+              <p className="text-xs font-semibold text-gray-700 mb-1">Voces Personalizadas</p>
               <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => updateLocal('voz', 'masculina')}
-                  className="py-2 rounded-md text-xs font-bold transition-all"
-                  style={{
-                    background: localConfig.voz === 'masculina' ? 'rgba(0,102,204,0.9)' : 'rgba(255,255,255,0.5)',
-                    color: localConfig.voz === 'masculina' ? 'white' : '#2D2D2D',
-                    border: '1px solid rgba(255,255,255,0.4)',
-                  }}
-                >
-                  Masculina
-                </button>
-                <button
-                  onClick={() => updateLocal('voz', 'femenina')}
-                  className="py-2 rounded-md text-xs font-bold transition-all"
-                  style={{
-                    background: localConfig.voz === 'femenina' ? 'rgba(196,30,58,0.9)' : 'rgba(255,255,255,0.5)',
-                    color: localConfig.voz === 'femenina' ? 'white' : '#2D2D2D',
-                    border: '1px solid rgba(255,255,255,0.4)',
-                  }}
-                >
-                  Femenina
-                </button>
+                {(
+                  [
+                    { key: 'juan'   as GeneroAudio, label: '🎤 Juan',   color: 'rgba(0,140,80,0.9)'   },
+                    { key: 'harry'  as GeneroAudio, label: '🎤 Harry',  color: 'rgba(100,60,180,0.9)' },
+                    { key: 'andrea' as GeneroAudio, label: '🎤 Andrea', color: 'rgba(220,80,140,0.9)' },
+                    { key: 'alicia' as GeneroAudio, label: '🎤 Alicia', color: 'rgba(200,120,0,0.9)'  },
+                  ] as { key: GeneroAudio; label: string; color: string }[]
+                ).map(({ key, label, color }) => (
+                  <button
+                    key={key}
+                    onClick={() => updateLocal('voz', key)}
+                    className="py-2 rounded-md text-xs font-bold transition-all"
+                    style={{
+                      background: localConfig.voz === key ? color : 'rgba(255,255,255,0.5)',
+                      color: localConfig.voz === key ? 'white' : '#2D2D2D',
+                      border: localConfig.voz === key
+                        ? `2px solid ${color}`
+                        : '1px solid rgba(255,255,255,0.4)',
+                      boxShadow: localConfig.voz === key ? `0 3px 10px ${color}` : 'none',
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
               </div>
             </div>
 

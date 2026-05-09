@@ -30,7 +30,7 @@ export interface Carton {
 
 export interface Configuracion {
   sonido: boolean;
-  voz: 'masculina' | 'femenina';
+  voz: 'masculina' | 'femenina' | 'juan' | 'harry' | 'andrea' | 'alicia';
   extraccion: 'automatica' | 'manual';
   tiempoExtraccion: number;
   repetirBola: boolean;

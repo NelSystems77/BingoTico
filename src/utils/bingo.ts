@@ -943,7 +943,17 @@ if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
   inicializarCacheVoces();
 
   speechSynthesis.onvoiceschanged = () => {
-    // Reinicializar cache cuando cambie la lista de voces
+    // Solo reinicializar si el cache aún no tiene voces válidas.
+    // Evita resetear el cache durante el TTS fallback cuando el navegador
+    // dispara onvoiceschanged de forma espuria (Edge/Chrome lo hacen
+    // varias veces aunque la lista de voces no haya cambiado realmente).
+    const nuevasVoces = speechSynthesis.getVoices();
+    if (nuevasVoces.length === 0) return; // voces aún no disponibles
+
+    // Si ya tenemos ambas voces cacheadas, no reinicializar
+    if (cacheInicializado && cacheVoces.masculina && cacheVoces.femenina) return;
+
+    // Reinicializar solo si el cache está incompleto
     cacheVoces = {};
     cacheInicializado = false;
     inicializarCacheVoces();
@@ -967,9 +977,22 @@ if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
 function dispararUtterance(texto: string, genero: 'masculina' | 'femenina'): void {
   const utterance = new SpeechSynthesisUtterance(texto);
   utterance.volume = 1;
-  utterance.lang   = 'es-US';
 
+  // Asegurar que el cache esté inicializado ANTES de crear el utterance
+  // para que la voz esté disponible en el momento de asignarla.
+  if (!cacheInicializado) {
+    inicializarCacheVoces();
+  }
   const entrada = obtenerVozCache(genero);
+
+  // Asignar la voz ANTES de configurar pitch/rate/lang para que el navegador
+  // no sobreescriba la selección al cambiar lang después de asignar voice.
+  if (entrada?.voice) {
+    utterance.voice = entrada.voice;
+    utterance.lang  = entrada.voice.lang;
+  } else {
+    utterance.lang = 'es-CR';
+  }
 
   if (genero === 'masculina') {
     if (entrada?.esNativa) {
@@ -992,11 +1015,6 @@ function dispararUtterance(texto: string, genero: 'masculina' | 'femenina'): voi
       utterance.pitch = 1.25 + Math.random() * 0.10;
       utterance.rate  = 0.88 + Math.random() * 0.10;
     }
-  }
-
-  if (entrada?.voice) {
-    utterance.voice = entrada.voice;
-    utterance.lang  = entrada.voice.lang;
   }
 
   speechSynthesis.speak(utterance);

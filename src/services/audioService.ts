@@ -13,8 +13,10 @@
  *   /audio/numbers-bingo-alicia/  → voz Alicia                 (1.mp3 … 75.mp3)
  *
  * ESTRATEGIA DE REPRODUCCIÓN:
- *   • Se usa Web Audio API (AudioContext + fetch + decodeAudioData) como
+ *   • Se intenta Web Audio API (AudioContext + fetch + decodeAudioData) como
  *     mecanismo principal de reproducción.
+ *   • Si decodeAudioData falla (p.ej. Safari/Edge con ciertos MP3 de ElevenLabs),
+ *     se usa HTMLAudioElement como fallback automático.
  *   • Las voces tradicionales (masculina/femenina) tienen dos frases
  *     (call1 / call2) que se alternan aleatoriamente.
  *   • Las voces personalizadas (juan/harry/andrea/alicia) tienen un único
@@ -53,8 +55,29 @@ const TOTAL_NUMEROS = 75;
 /** AudioContext compartido para toda la app */
 let audioCtx: AudioContext | null = null;
 
-/** Nodo de ganancia activo (para poder detener el audio en curso) */
+/** Nodo de reproducción Web Audio activo */
 let sourceActivo: AudioBufferSourceNode | null = null;
+
+/**
+ * HTMLAudioElement activo (fallback cuando decodeAudioData falla).
+ * Se usa en Safari/Edge con ciertos MP3 de ElevenLabs que no pueden
+ * ser decodificados por la Web Audio API.
+ */
+let htmlAudioActivo: HTMLAudioElement | null = null;
+
+/**
+ * Pool de HTMLAudioElements pre-creados y desbloqueados desde un gesto
+ * del usuario. En iOS Safari, play() solo funciona si el elemento fue
+ * "tocado" previamente desde un gesto directo.
+ */
+const htmlAudioPool: HTMLAudioElement[] = [];
+
+/**
+ * Conjunto de URLs que fallaron con decodeAudioData.
+ * Para estas URLs se usa directamente HTMLAudioElement sin reintentar
+ * la decodificación Web Audio.
+ */
+const urlsConFallbackHTML = new Set<string>();
 
 /**
  * Obtiene (o crea) el AudioContext compartido.
@@ -116,8 +139,12 @@ function urlAudioSimple(genero: GeneroAudio, numero: number): string {
 /**
  * Descarga y decodifica un MP3 como AudioBuffer.
  * Cachea el resultado para evitar re-descargas.
+ * Retorna null si falla (en ese caso se usará HTMLAudioElement como fallback).
  */
 async function obtenerBuffer(url: string): Promise<AudioBuffer | null> {
+  // Si esta URL ya falló antes con Web Audio, no reintentar
+  if (urlsConFallbackHTML.has(url)) return null;
+
   // Retornar del cache si ya está decodificado
   if (cacheBuffers.has(url)) {
     return cacheBuffers.get(url)!;
@@ -140,8 +167,48 @@ async function obtenerBuffer(url: string): Promise<AudioBuffer | null> {
     cacheBuffers.set(url, audioBuffer);
     return audioBuffer;
   } catch (err) {
-    console.warn(`[AudioService] Error cargando/decodificando ${url}:`, err);
+    // Marcar esta URL para usar HTMLAudioElement en el futuro
+    urlsConFallbackHTML.add(url);
+    console.warn(`[AudioService] decodeAudioData falló para ${url} — se usará HTMLAudioElement como fallback:`, err);
     return null;
+  }
+}
+
+/**
+ * Reproduce un MP3 usando HTMLAudioElement (fallback para Safari/Edge).
+ * Usa el pool de elementos pre-desbloqueados si está disponible (iOS Safari).
+ * Retorna true si la reproducción se inició correctamente.
+ */
+async function reproducirConHTMLAudio(url: string): Promise<boolean> {
+  try {
+    // Detener el HTMLAudio anterior si existe
+    if (htmlAudioActivo) {
+      htmlAudioActivo.pause();
+      htmlAudioActivo.src = '';
+      htmlAudioActivo = null;
+    }
+
+    // Usar un elemento del pool (pre-desbloqueado en iOS) o crear uno nuevo
+    const audio = htmlAudioPool.length > 0
+      ? htmlAudioPool[0]   // reutilizar el mismo elemento del pool
+      : new Audio();
+
+    audio.src = url;
+    audio.preload = 'auto';
+    htmlAudioActivo = audio;
+
+    await audio.play();
+
+    audio.onended = () => {
+      if (htmlAudioActivo === audio) {
+        htmlAudioActivo = null;
+      }
+    };
+
+    return true;
+  } catch (err) {
+    console.warn(`[AudioService] HTMLAudioElement también falló para ${url}:`, err);
+    return false;
   }
 }
 
@@ -239,15 +306,11 @@ export async function precargarGenero(
 }
 
 /**
- * Reproduce el audio del número indicado para el género dado usando Web Audio API.
+ * Reproduce el audio del número indicado para el género dado.
  *
- * ESTRATEGIA iOS Safari:
- * • Se usa AudioContext en lugar de HTMLAudioElement.
- * • Una vez que el AudioContext se desbloquea con el primer gesto del usuario
- *   (via desbloquearAudioContext()), puede reproducir audio desde cualquier
- *   contexto asíncrono, incluyendo setInterval y .then() de Promises.
- * • HTMLAudioElement.play() en iOS Safari solo funciona desde handlers de
- *   gesto directo, lo que lo hace incompatible con el modo automático del bingo.
+ * Intenta primero con Web Audio API (AudioContext + decodeAudioData).
+ * Si falla (p.ej. Safari/Edge con MP3 de ElevenLabs), usa HTMLAudioElement
+ * como fallback automático.
  *
  * @returns Promise<boolean> — true = reproducción iniciada, false = falló
  */
@@ -304,8 +367,9 @@ export async function reproducirNumero(
   // Obtener el AudioBuffer (del cache o descargando)
   const buffer = await obtenerBuffer(url);
   if (!buffer) {
-    console.warn(`[AudioService] No se pudo obtener buffer para ${genero}/${numero} (${url})`);
-    return false;
+    // Web Audio falló o no disponible — intentar con HTMLAudioElement
+    console.log(`[AudioService] Usando HTMLAudioElement para ${genero}/${numero} (${url})`);
+    return reproducirConHTMLAudio(url);
   }
 
   // Crear y conectar el nodo de reproducción
@@ -326,7 +390,8 @@ export async function reproducirNumero(
     return true;
   } catch (err) {
     console.warn(`[AudioService] Error reproduciendo ${genero}/${numero}:`, err);
-    return false;
+    // Último recurso: HTMLAudioElement
+    return reproducirConHTMLAudio(url);
   }
 }
 
@@ -365,6 +430,26 @@ export function desbloquearAudioContext(): void {
   } else {
     console.log('[AudioService] ✅ AudioContext desbloqueado');
   }
+
+  // Pre-desbloquear HTMLAudioElements para el fallback en iOS Safari.
+  // En iOS, play() solo funciona si se llama sincrónicamente desde un gesto.
+  // Creamos y "tocamos" elementos silenciosos para que queden desbloqueados.
+  if (htmlAudioPool.length === 0) {
+    for (let i = 0; i < 3; i++) {
+      try {
+        const a = new Audio();
+        a.volume = 0;
+        // Intentar play() silencioso para desbloquear el elemento en iOS
+        a.play().catch(() => { /* silencioso */ });
+        a.pause();
+        a.volume = 1;
+        htmlAudioPool.push(a);
+      } catch {
+        // ignorar
+      }
+    }
+    console.log(`[AudioService] HTMLAudio pool inicializado (${htmlAudioPool.length} elementos)`);
+  }
 }
 
 /**
@@ -376,7 +461,7 @@ export function desbloquearAudioElement(): void {
 }
 
 /**
- * Detiene toda reproducción activa.
+ * Detiene toda reproducción activa (Web Audio y HTMLAudioElement).
  */
 export function detenerTodoAudio(): void {
   if (sourceActivo) {
@@ -387,6 +472,15 @@ export function detenerTodoAudio(): void {
       // ignorar
     }
     sourceActivo = null;
+  }
+  if (htmlAudioActivo) {
+    try {
+      htmlAudioActivo.pause();
+      htmlAudioActivo.src = '';
+    } catch {
+      // ignorar
+    }
+    htmlAudioActivo = null;
   }
 }
 

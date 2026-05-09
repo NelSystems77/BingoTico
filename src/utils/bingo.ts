@@ -1082,15 +1082,16 @@ export function hablarNumero(numero: number, voz: 'masculina' | 'femenina'): voi
 
 /**
  * Reproduce el número usando archivos MP3 pregrabados (lazy loading).
- * NO usa SpeechSynthesis como fallback — los MP3 son la única fuente de audio.
+ * Si el MP3 falla (error de red, formato no soportado, AudioContext bloqueado),
+ * usa Web Speech API (TTS) como fallback para garantizar audio en todos los
+ * dispositivos, incluyendo Android e iOS.
  *
  * En iOS Safari el AudioContext (desbloqueado con el primer gesto del usuario
  * via desbloquearAudioContext()) mantiene el permiso de reproducción activo
- * incluso desde setInterval o código asíncrono, a diferencia de HTMLAudioElement
- * que requiere que play() se llame directamente desde un handler de gesto.
+ * incluso desde setInterval o código asíncrono.
  *
  * @param numero  Número de bola (1–90)
- * @param voz     Género de la voz: 'masculina' | 'femenina'
+ * @param voz     Género de la voz
  */
 export function hablarNumeroConAudio(
   numero: number,
@@ -1098,9 +1099,12 @@ export function hablarNumeroConAudio(
 ): void {
   reproducirNumero(numero, voz).then((exito) => {
     if (!exito) {
-      // MP3 falló (archivo no encontrado, error de red, etc.)
-      // No se usa TTS — se registra el error para diagnóstico.
-      console.warn(`[BingoTico] No se pudo reproducir MP3 ${voz}/${numero}`);
+      // MP3 falló — usar TTS como fallback para garantizar audio en todos los dispositivos
+      console.warn(`[BingoTico] MP3 ${voz}/${numero} falló — usando TTS como fallback`);
+      // Determinar género TTS según la voz seleccionada
+      const generoTTS: 'masculina' | 'femenina' =
+        (voz === 'juan' || voz === 'harry' || voz === 'masculina') ? 'masculina' : 'femenina';
+      hablarNumero(numero, generoTTS);
     }
   });
 }

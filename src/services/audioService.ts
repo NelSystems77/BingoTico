@@ -12,21 +12,18 @@
  *   /audio/numbers-bingo-andrea/  → voz Andrea                 (1.mp3 … 75.mp3)
  *   /audio/numbers-bingo-alicia/  → voz Alicia                 (1.mp3 … 75.mp3)
  *
- * ESTRATEGIA DE REPRODUCCIÓN:
- *   1. Se descarga el MP3 como ArrayBuffer vía fetch().
- *   2. Se intenta decodificar con Web Audio API (AudioContext + decodeAudioData).
- *      Antes de decodificar se elimina el encabezado ID3v2 si está presente,
- *      ya que ID3v2.4 (generado por ElevenLabs) no es compatible con Edge/iOS/Android.
- *   3. Si decodeAudioData falla, se crea un Blob URL a partir del ArrayBuffer
- *      y se reproduce con HTMLAudioElement. Los Blob URLs no requieren gesto
- *      del usuario para reproducirse porque los datos ya están en memoria local.
- *   4. Las voces tradicionales (masculina/femenina) tienen dos frases
- *      (call1 / call2) que se alternan aleatoriamente.
- *   5. Las voces personalizadas (juan/harry/andrea/alicia) tienen un único
- *      archivo por número.
- *   6. El AudioContext se desbloquea llamando desbloquearAudioContext() desde
- *      un handler de evento de usuario (tap/click).
- *   7. Los AudioBuffer y Blob URLs se cachean en memoria para evitar re-descargas.
+ * ESTRATEGIA DE REPRODUCCIÓN (en orden de prioridad):
+ *   1. Web Audio API (AudioContext + decodeAudioData) con buffer ID3-stripped.
+ *      Funciona en todos los navegadores de escritorio y en iOS/Android cuando
+ *      el AudioContext fue desbloqueado desde un gesto del usuario.
+ *   2. HTMLAudioElement con Blob URL creado desde el buffer ID3-stripped.
+ *      Los Blob URLs no requieren gesto del usuario para reproducirse porque
+ *      los datos ya están en memoria local (no hay petición de red).
+ *      IMPORTANTE: el Blob se crea desde el buffer SIN encabezado ID3v2.4,
+ *      ya que Edge/iOS/Android no pueden reproducir MP3 con ID3v2.4 via
+ *      HTMLAudioElement tampoco.
+ *   3. HTMLAudioElement con src directo (URL remota).
+ *      Último recurso — puede fallar en iOS/Android sin gesto activo.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -102,8 +99,8 @@ const cacheBuffers = new Map<string, AudioBuffer>();
 
 /**
  * Cache de Blob URLs para reproducción con HTMLAudioElement.
- * Se usa cuando decodeAudioData falla (p.ej. ElevenLabs MP3 en Edge/iOS/Android).
- * Los Blob URLs no requieren gesto del usuario para reproducirse.
+ * IMPORTANTE: los Blob URLs se crean desde el buffer SIN encabezado ID3v2.4
+ * para que Edge/iOS/Android puedan reproducirlos correctamente.
  * Clave: URL original del archivo MP3.
  */
 const cacheBlobURLs = new Map<string, string>();
@@ -141,9 +138,10 @@ function urlAudioSimple(genero: GeneroAudio, numero: number): string {
  * Elimina el encabezado ID3v2 de un ArrayBuffer si está presente.
  *
  * ElevenLabs genera MP3 con etiquetas ID3v2.4 (versión 4), que Edge,
- * iOS Safari y Android no pueden decodificar con decodeAudioData.
+ * iOS Safari y Android no pueden decodificar con decodeAudioData NI
+ * reproducir con HTMLAudioElement.
  * Al eliminar el encabezado ID3 se exponen directamente los frames MP3
- * que todos los navegadores saben decodificar.
+ * que todos los navegadores saben decodificar y reproducir.
  *
  * Estructura del encabezado ID3v2:
  *   Bytes 0-2 : "ID3" (0x49 0x44 0x33)
@@ -152,6 +150,8 @@ function urlAudioSimple(genero: GeneroAudio, numero: number): string {
  *   Byte  5   : flags
  *   Bytes 6-9 : tamaño del tag en formato syncsafe (7 bits por byte)
  *   Byte  10+ : frames del tag
+ *
+ * @returns Un NUEVO ArrayBuffer sin el encabezado ID3v2 (slice crea copia).
  */
 function stripID3v2(buffer: ArrayBuffer): ArrayBuffer {
   const view = new Uint8Array(buffer);
@@ -175,7 +175,7 @@ function stripID3v2(buffer: ArrayBuffer): ArrayBuffer {
     return buffer; // Offset inválido — devolver original para no romper nada
   }
 
-  // Devolver el buffer sin el encabezado ID3v2
+  // slice() crea una COPIA — el buffer original no se modifica ni se detach
   return buffer.slice(offset);
 }
 
@@ -184,10 +184,14 @@ function stripID3v2(buffer: ArrayBuffer): ArrayBuffer {
  *
  * Estrategia:
  *   1. Descarga el archivo como ArrayBuffer.
- *   2. Intenta decodificar con Web Audio API (tras strip de ID3v2).
- *   3. Si falla, crea un Blob URL y lo guarda en cacheBlobURLs.
- *      Los Blob URLs se pueden reproducir con HTMLAudioElement desde
- *      cualquier contexto (incluso timers) porque los datos son locales.
+ *   2. Elimina el encabezado ID3v2 (crea strippedBuffer como copia).
+ *   3. Intenta decodificar strippedBuffer con Web Audio API.
+ *   4. Si falla, crea un Blob URL desde strippedBuffer (NO desde el raw)
+ *      y lo guarda en cacheBlobURLs.
+ *
+ * CORRECCIÓN CRÍTICA: el Blob URL se crea desde strippedBuffer (sin ID3v2.4),
+ * no desde rawBuffer. Edge/iOS/Android no pueden reproducir MP3 con ID3v2.4
+ * ni siquiera con HTMLAudioElement + Blob URL.
  *
  * Retorna el AudioBuffer si Web Audio funcionó, o null si se usará Blob URL.
  */
@@ -211,34 +215,37 @@ async function obtenerBuffer(url: string): Promise<AudioBuffer | null> {
     }
     const rawBuffer = await response.arrayBuffer();
 
-    // Guardar una copia del rawBuffer para el Blob URL fallback ANTES de
-    // que decodeAudioData lo transfiera (detach). slice() crea una copia.
-    const rawBufferCopy = rawBuffer.slice(0);
-
-    // Eliminar encabezado ID3v2 antes de decodificar.
-    // ElevenLabs genera MP3 con ID3v2.4 que Edge/iOS Safari/Android
-    // no pueden decodificar con decodeAudioData.
+    // Eliminar encabezado ID3v2 ANTES de decodificar Y antes de crear el Blob.
+    // stripID3v2 usa slice() internamente → crea una copia nueva, no modifica rawBuffer.
+    // strippedBuffer es el buffer limpio que usaremos tanto para decodeAudioData
+    // como para el Blob URL fallback.
     const strippedBuffer = stripID3v2(rawBuffer);
 
     try {
+      // Necesitamos una copia para decodeAudioData porque puede transferir (detach)
+      // el buffer en algunas implementaciones del navegador.
+      const bufferParaDecode = strippedBuffer.slice(0);
+
       // Callback API — compatible con TODAS las versiones de iOS Safari
       const audioBuffer = await new Promise<AudioBuffer>((resolve, reject) => {
-        ctx.decodeAudioData(strippedBuffer, resolve, reject);
+        ctx.decodeAudioData(bufferParaDecode, resolve, reject);
       });
       cacheBuffers.set(url, audioBuffer);
       return audioBuffer;
     } catch (decodeErr) {
-      // decodeAudioData falló — crear Blob URL para fallback con HTMLAudioElement.
-      // Los Blob URLs no requieren gesto del usuario para reproducirse porque
-      // los datos ya están en memoria local (no hay petición de red).
-      console.warn(`[AudioService] decodeAudioData falló para ${url} — creando Blob URL para fallback:`, decodeErr);
+      // decodeAudioData falló — crear Blob URL desde strippedBuffer (SIN ID3v2.4)
+      // para fallback con HTMLAudioElement.
+      // CORRECCIÓN: usar strippedBuffer, NO rawBuffer. Edge/iOS/Android no pueden
+      // reproducir MP3 con ID3v2.4 ni siquiera con HTMLAudioElement + Blob URL.
+      console.warn(`[AudioService] decodeAudioData falló para ${url} — creando Blob URL (stripped) para fallback:`, decodeErr);
       urlsConFallbackHTML.add(url);
 
       if (!cacheBlobURLs.has(url)) {
-        const blob = new Blob([rawBufferCopy], { type: 'audio/mpeg' });
+        // strippedBuffer ya es una copia (slice) — seguro usarlo aquí
+        const blob = new Blob([strippedBuffer], { type: 'audio/mpeg' });
         const blobUrl = URL.createObjectURL(blob);
         cacheBlobURLs.set(url, blobUrl);
-        console.log(`[AudioService] Blob URL creado para ${url}`);
+        console.log(`[AudioService] Blob URL (stripped) creado para ${url}`);
       }
 
       return null;
@@ -383,10 +390,10 @@ export async function precargarGenero(
 /**
  * Reproduce el audio del número indicado para el género dado.
  *
- * Intenta primero con Web Audio API (AudioContext + decodeAudioData).
- * Si falla, usa Blob URL + HTMLAudioElement como fallback.
- * Los Blob URLs funcionan desde timers (setInterval) en iOS/Android
- * porque los datos ya están en memoria local.
+ * Estrategia en orden de prioridad:
+ *   1. Web Audio API (AudioContext + decodeAudioData con buffer stripped).
+ *   2. HTMLAudioElement con Blob URL creado desde buffer stripped (sin ID3v2.4).
+ *   3. HTMLAudioElement con src directo (URL remota) — último recurso.
  *
  * @returns Promise<boolean> — true = reproducción iniciada, false = falló
  */
@@ -395,7 +402,6 @@ export async function reproducirNumero(
   genero: GeneroAudio
 ): Promise<boolean> {
   const ctx = obtenerAudioContext();
-  if (!ctx) return false;
 
   // Detener audio anterior si existe
   if (sourceActivo) {
@@ -409,7 +415,7 @@ export async function reproducirNumero(
   }
 
   // Reanudar el AudioContext si está suspendido (iOS/Android lo suspenden en background)
-  if (ctx.state !== 'running') {
+  if (ctx && ctx.state !== 'running') {
     try {
       await ctx.resume();
     } catch {
@@ -440,47 +446,51 @@ export async function reproducirNumero(
     }
   }
 
-  // Obtener el AudioBuffer (del cache o descargando + decodificando)
-  const buffer = await obtenerBuffer(url);
+  // ── Intentar Web Audio API ───────────────────────────────────────────────
+  if (ctx) {
+    // Obtener el AudioBuffer (del cache o descargando + decodificando)
+    const buffer = await obtenerBuffer(url);
 
-  if (buffer) {
-    // ── Reproducir con Web Audio API ────────────────────────────────────
-    try {
-      const source = ctx.createBufferSource();
-      source.buffer = buffer;
-      source.connect(ctx.destination);
-      source.start(0);
-      sourceActivo = source;
+    if (buffer) {
+      try {
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+        source.start(0);
+        sourceActivo = source;
 
-      source.onended = () => {
-        if (sourceActivo === source) {
-          sourceActivo = null;
-        }
-      };
+        source.onended = () => {
+          if (sourceActivo === source) {
+            sourceActivo = null;
+          }
+        };
 
-      return true;
-    } catch (err) {
-      console.warn(`[AudioService] Error reproduciendo ${genero}/${numero} con Web Audio:`, err);
-      // Caer al fallback de Blob URL
+        return true;
+      } catch (err) {
+        console.warn(`[AudioService] Error reproduciendo ${genero}/${numero} con Web Audio:`, err);
+        // Caer al fallback de Blob URL
+      }
     }
   }
 
   // ── Fallback: Blob URL + HTMLAudioElement ────────────────────────────────
-  // Si ya tenemos el Blob URL en cache, usarlo directamente.
-  // Si no, intentar descargar y crear el Blob URL ahora.
+  // Si ya tenemos el Blob URL en cache (creado desde stripped buffer), usarlo.
+  // Si no, intentar descargar, strip y crear el Blob URL ahora.
   let blobUrl = cacheBlobURLs.get(url);
 
   if (!blobUrl) {
-    // Intentar descargar y crear Blob URL
+    // Intentar descargar, strip y crear Blob URL
     try {
       const response = await fetch(url);
       if (response.ok) {
         const rawBuffer = await response.arrayBuffer();
-        const blob = new Blob([rawBuffer], { type: 'audio/mpeg' });
+        // CORRECCIÓN CRÍTICA: crear Blob desde strippedBuffer, NO desde rawBuffer
+        const strippedBuffer = stripID3v2(rawBuffer);
+        const blob = new Blob([strippedBuffer], { type: 'audio/mpeg' });
         blobUrl = URL.createObjectURL(blob);
         cacheBlobURLs.set(url, blobUrl);
         urlsConFallbackHTML.add(url);
-        console.log(`[AudioService] Blob URL creado on-demand para ${genero}/${numero}`);
+        console.log(`[AudioService] Blob URL (stripped) creado on-demand para ${genero}/${numero}`);
       }
     } catch (fetchErr) {
       console.warn(`[AudioService] No se pudo descargar ${url}:`, fetchErr);
@@ -488,7 +498,7 @@ export async function reproducirNumero(
   }
 
   if (blobUrl) {
-    console.log(`[AudioService] Usando Blob URL para ${genero}/${numero}`);
+    console.log(`[AudioService] Usando Blob URL (stripped) para ${genero}/${numero}`);
     return reproducirConBlobURL(blobUrl, url);
   }
 
